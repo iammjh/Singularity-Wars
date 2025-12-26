@@ -5,92 +5,94 @@ from OpenGL.GLUT import *
 from OpenGL.GLUT import GLUT_BITMAP_HELVETICA_18
 import math, random
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
-def clamp(v, lo, hi):
-    return max(lo, min(hi, v))
-
-def dist3_2(a, b):
-    dx = a[0] - b[0]
-    dy = a[1] - b[1]
-    dz = a[2] - b[2]
-    return dx*dx + dy*dy + dz*dz
-
-def _draw_flat_disk(radius, height, slices=24):
-    quad = gluNewQuadric()
-    gluCylinder(quad, radius, radius, height, slices, 1)
-
-def _update_wormhole_teleport():
-    global player_x, player_y, player_z
-    global wormhole_tp_cd
-
-    if wormhole_tp_cd > 0:
-        return
-    if len(wormholes) < 2:
-        return
-
-    for i, w in enumerate(wormholes):
-        wx, wy, wz = w["pos"]
-        wr = w["core_r"]
-
-        dx = player_x - wx
-        dy = player_y - wy
-        dz = player_z - wz
-
-        rr = wr + SHIP_COLLISION_R
-        if (dx*dx + dy*dy + dz*dz) <= (rr * rr):
-            choices = [j for j in range(len(wormholes)) if j != i]
-            j = random.choice(choices)
-            dest = wormholes[j]
-            tx, ty, tz = dest["pos"]
-            tr = dest["core_r"]
-
-            rad = math.radians(player_angle)
-            fx, fy = math.cos(rad), math.sin(rad)
-
-            push_out = tr + SHIP_COLLISION_R + 25.0
-            player_x = tx + fx * push_out
-            player_y = ty + fy * push_out
-            player_z = tz
-
-            player_x = clamp(player_x, WORLD_MIN, WORLD_MAX)
-            player_y = clamp(player_y, WORLD_MIN, WORLD_MAX)
-            player_z = clamp(player_z, WORLD_Z_MIN, WORLD_Z_MAX)
-
-            wormhole_tp_cd = WORMHOLE_TELEPORT_COOLDOWN_FRAMES
-            return
-
-# ------------------------------------------------------------
-# Camera
-# ------------------------------------------------------------
 fovY = 50
 first_person = False
-
-# ------------------------------------------------------------
-# World boundary (bigger space)
-# ------------------------------------------------------------
 WORLD_MIN = -2500
 WORLD_MAX = 2500
 WORLD_Z_MIN = -600.0
 WORLD_Z_MAX = 600.0
 
-# ------------------------------------------------------------
-# Ship size control
-# ------------------------------------------------------------
+vel_x, vel_y = 0.0, 0.0
+ACCELERATION = 1.00
+MAX_SPEED = 24.0
+DRAG = 0.785
+
+vel_z = 0.0
+ACCELERATION_Z = 0.9
+MAX_SPEED_Z = 18.0
+DRAG_Z = 0.785
+
+keys = {'w': False, 's': False, 'a': False, 'd': False, 'q': False, 'e': False}
+
+top5_scores = []
+last_round_score = 0
+_scoreboard_locked = False
+
+gun_level = 1
+game_over = False
+controls_disabled = False
+
+#Ship
 SHIP_SCALE = 0.6
 SHIP_COLLISION_R = 45.0 * SHIP_SCALE
-
-# ------------------------------------------------------------
-# Player
-# ------------------------------------------------------------
 player_x, player_y, player_z = 0.0, 0.0, 30.0
 player_angle = 0.0
 rot_step = 1
 
-# ------------------------------------------------------------
-# Ship Stats (PER PDF) - HP + Speed Mult + Thrust
-# ------------------------------------------------------------
+player_bullets = []
+player_bullet_cd = 0
+
+PLAYER_BULLET_DRAW_SCALE = 0.22
+PLAYER_BULLET_HIT_R = 18.0
+ENEMY_HIT_R = 38.0
+
+AUTOAIM_MAX_RANGE = 1400.0
+AUTOAIM_CONE_DEG = 14.0
+AUTOAIM_CONE_COS = math.cos(math.radians(AUTOAIM_CONE_DEG))
+def _pick_autoaim_target(muzzle_x, muzzle_y, muzzle_z, fx, fy):
+    best_i = -1
+    best_score = -1e9
+    best_pos = None
+
+    f_len = math.sqrt(fx*fx + fy*fy)
+    if f_len < 1e-6:
+        return -1, 0, 0, 0
+    fux, fuy = fx / f_len, fy / f_len
+
+    for i, e in enumerate(enemies):
+        ex, ey, ez = e[0], e[1], e[2]
+
+        dx = ex - muzzle_x
+        dy = ey - muzzle_y
+        dz = ez - muzzle_z
+
+        d2 = dx*dx + dy*dy + dz*dz
+        if d2 < 1.0:
+            continue
+        if d2 > (AUTOAIM_MAX_RANGE * AUTOAIM_MAX_RANGE):
+            continue
+
+        d_xy = math.sqrt(dx*dx + dy*dy)
+        if d_xy < 1e-6:
+            continue
+
+        ux, uy = dx / d_xy, dy / d_xy
+        cosang = (ux * fux + uy * fuy)
+        if cosang < AUTOAIM_CONE_COS:
+            continue
+
+        dist = math.sqrt(d2)
+        score = (cosang * 2.0) - (dist / AUTOAIM_MAX_RANGE)
+        if score > best_score:
+            best_score = score
+            best_i = i
+            best_pos = (ex, ey, ez)
+
+    if best_i == -1:
+        return -1, 0, 0, 0
+    return best_i, best_pos[0], best_pos[1], best_pos[2]
+
+
 SHIP_STATS_BY_LEVEL = {
     1: {"hp": 200, "speed_mult": 1.00, "thrust": 0.5},
     2: {"hp": 270, "speed_mult": 1.08, "thrust": 0.9},
@@ -103,9 +105,6 @@ ship_level = 1
 player_max_hp = SHIP_STATS_BY_LEVEL[ship_level]["hp"]
 player_life = player_max_hp
 
-# ------------------------------------------------------------
-# Ship upgrade requirements (PER PDF) - EXACT (kills only)
-# ------------------------------------------------------------
 SHIP_UPGRADE_REQUIREMENTS = [
     (1, 0),
     (2, 7),
@@ -121,39 +120,11 @@ def _update_ship_level_from_progress():
         if enemy_kills_total >= need_kills:
             new_level = lvl
     if new_level != ship_level:
-        set_ship_level(new_level)  # heals to new max HP (per PDF)
+        set_ship_level(new_level)
 
 player_score = 0
 
-# ==========================
-# Scoreboard (Top 5) + Last Round Score
-# ==========================
-top5_scores = []           # persists across R restarts (in-memory)
-last_round_score = 0       # last played round score
-_scoreboard_locked = False # prevents double-recording
-
-gun_level = 1
-game_over = False
-controls_disabled = False
-
-# ------------------------------------------------------------
-# Physics (realistic movement)
-# ------------------------------------------------------------
-vel_x, vel_y = 0.0, 0.0
-ACCELERATION = 1.00
-MAX_SPEED = 24.0
-DRAG = 0.785
-
-vel_z = 0.0
-ACCELERATION_Z = 0.9
-MAX_SPEED_Z = 18.0
-DRAG_Z = 0.785
-
-keys = {'w': False, 's': False, 'a': False, 'd': False, 'q': False, 'e': False}
-
-# ------------------------------------------------------------
-# Player Weapon Stats (PER PDF)
-# ------------------------------------------------------------
+#Weapon
 WEAPON_STATS_BY_LEVEL = {
     1: {"dmg": 40, "fire_mult": 1.00, "speed_mult": 1.00},
     2: {"dmg": 50, "fire_mult": 1.15, "speed_mult": 1.10},
@@ -208,521 +179,7 @@ def _player_bullet_life_frames(spd):
     map_len = float(WORLD_MAX - WORLD_MIN)
     return max(10, int(map_len / max(0.001, spd)))
 
-# ------------------------------------------------------------
-# Enemies
-# ------------------------------------------------------------
-ENEMY_COUNT_BY_SHIP_LEVEL = {1: 5, 2: 6, 3: 8, 4: 10, 5: 13}
 
-ENEMY_SPAWN_RADIUS_MIN = 900.0
-ENEMY_SPAWN_RADIUS_MAX = 1500.0
-ENEMY_SPEED = 1
-ENEMY_STOP_DIST = 380.0
-
-ENEMY_FIRE_RANGE = 850.0
-ENEMY_FIRE_COOLDOWN_FRAMES = 60
-ENEMY_BULLET_SPEED = 10.0
-ENEMY_BULLET_DAMAGE = 1
-ENEMY_BULLET_LIFE_FRAMES = 180
-
-enemies = []
-enemy_bullets = []
-
-ENEMY_SCALE_MIN = 0.8
-ENEMY_SCALE_MAX = 1.5
-ENEMY_HP_MIN = 40
-ENEMY_HP_MAX = 80
-
-def _enemy_scale_and_hp():
-    s = random.uniform(ENEMY_SCALE_MIN, ENEMY_SCALE_MAX)
-    t = (s - ENEMY_SCALE_MIN) / max(0.0001, (ENEMY_SCALE_MAX - ENEMY_SCALE_MIN))
-    hp = int(ENEMY_HP_MIN + t * (ENEMY_HP_MAX - ENEMY_HP_MIN))
-    return s, hp
-
-# ------------------------------------------------------------
-# Player bullets
-# ------------------------------------------------------------
-player_bullets = []
-player_bullet_cd = 0
-
-PLAYER_BULLET_DRAW_SCALE = 0.22
-PLAYER_BULLET_HIT_R = 18.0
-ENEMY_HIT_R = 38.0
-
-# --------------------------
-# Player auto-aim
-# --------------------------
-AUTOAIM_MAX_RANGE = 1400.0
-AUTOAIM_CONE_DEG = 14.0
-AUTOAIM_CONE_COS = math.cos(math.radians(AUTOAIM_CONE_DEG))
-
-def _pick_autoaim_target(muzzle_x, muzzle_y, muzzle_z, fx, fy):
-    best_i = -1
-    best_score = -1e9
-    best_pos = None
-
-    f_len = math.sqrt(fx*fx + fy*fy)
-    if f_len < 1e-6:
-        return -1, 0, 0, 0
-    fux, fuy = fx / f_len, fy / f_len
-
-    for i, e in enumerate(enemies):
-        ex, ey, ez = e[0], e[1], e[2]
-
-        dx = ex - muzzle_x
-        dy = ey - muzzle_y
-        dz = ez - muzzle_z
-
-        d2 = dx*dx + dy*dy + dz*dz
-        if d2 < 1.0:
-            continue
-        if d2 > (AUTOAIM_MAX_RANGE * AUTOAIM_MAX_RANGE):
-            continue
-
-        d_xy = math.sqrt(dx*dx + dy*dy)
-        if d_xy < 1e-6:
-            continue
-
-        ux, uy = dx / d_xy, dy / d_xy
-        cosang = (ux * fux + uy * fuy)
-        if cosang < AUTOAIM_CONE_COS:
-            continue
-
-        dist = math.sqrt(d2)
-        score = (cosang * 2.0) - (dist / AUTOAIM_MAX_RANGE)
-        if score > best_score:
-            best_score = score
-            best_i = i
-            best_pos = (ex, ey, ez)
-
-    if best_i == -1:
-        return -1, 0, 0, 0
-    return best_i, best_pos[0], best_pos[1], best_pos[2]
-
-# ------------------------------------------------------------
-# Objects
-# ------------------------------------------------------------
-rocks = []
-black_holes = []
-white_holes = []
-wormholes = []
-
-# ------------------------------------------------------------
-# Black hole / White hole physics
-# ------------------------------------------------------------
-FPS_ASSUMED = 60.0
-HOLE_SOFTENING = 220.0
-BH_PULL_STRENGTH = 9000.0
-WH_PUSH_STRENGTH = 9000.0
-
-HOLE_EFFECT_RANGE_MULT = 15.00
-MAX_HOLE_ACCEL = 55.0
-
-BH_DAMAGE_ZONE_MULT = 3.0
-BH_DMG_MIN_PER_SEC = 80.0
-BH_DMG_MAX_PER_SEC = 150.0
-
-def _hole_accel_at_point(px, py, pz):
-    """
-    Returns (ax, ay, az, kind, hole_ref, dist_raw)
-    ax/ay/az are accelerations (units/sec^2). Caller applies dt.
-    One source only (no stacking).
-    """
-    best_kind = None
-    best_hole = None
-    best_ax = best_ay = best_az = 0.0
-    best_mag2 = 0.0
-    best_dist_raw = 1e9
-
-    # --- black holes pull ---
-    for bh in black_holes:
-        bx, by, bz = bh["pos"]
-        core = float(bh["core_r"])
-
-        dx = bx - px
-        dy = by - py
-        dz = bz - pz
-
-        d2_raw = dx*dx + dy*dy + dz*dz
-        d_raw = math.sqrt(d2_raw) if d2_raw > 1e-9 else 0.0
-
-        hole_effect_range = core * HOLE_EFFECT_RANGE_MULT
-        if d_raw > hole_effect_range:
-            continue
-
-        d2 = d2_raw + (HOLE_SOFTENING * HOLE_SOFTENING)
-        d = math.sqrt(d2)
-
-        a = (BH_PULL_STRENGTH * (core * core)) / d2
-        if a > MAX_HOLE_ACCEL:
-            a = MAX_HOLE_ACCEL
-
-        ax = (dx / d) * a
-        ay = (dy / d) * a
-        az = (dz / d) * a
-
-        mag2 = ax*ax + ay*ay + az*az
-        if mag2 > best_mag2:
-            best_mag2 = mag2
-            best_kind = "BH"
-            best_hole = bh
-            best_ax, best_ay, best_az = ax, ay, az
-            best_dist_raw = d_raw
-
-    # --- white holes repel ---
-    for wh in white_holes:
-        wx, wy, wz = wh["pos"]
-        core = float(wh["core_r"])
-
-        dx = px - wx
-        dy = py - wy
-        dz = pz - wz
-
-        d2_raw = dx*dx + dy*dy + dz*dz
-        d_raw = math.sqrt(d2_raw) if d2_raw > 1e-9 else 0.0
-
-        hole_effect_range = core * HOLE_EFFECT_RANGE_MULT
-        if d_raw > hole_effect_range:
-            continue
-
-        d2 = d2_raw + (HOLE_SOFTENING * HOLE_SOFTENING)
-        d = math.sqrt(d2)
-
-        a = (WH_PUSH_STRENGTH * (core * core)) / d2
-        if a > MAX_HOLE_ACCEL:
-            a = MAX_HOLE_ACCEL
-
-        ax = (dx / d) * a
-        ay = (dy / d) * a
-        az = (dz / d) * a
-
-        mag2 = ax*ax + ay*ay + az*az
-        if mag2 > best_mag2:
-            best_mag2 = mag2
-            best_kind = "WH"
-            best_hole = wh
-            best_ax, best_ay, best_az = ax, ay, az
-            best_dist_raw = d_raw
-
-    if best_kind is None:
-        return 0.0, 0.0, 0.0, None, None, 0.0
-    return best_ax, best_ay, best_az, best_kind, best_hole, best_dist_raw
-
-def _apply_black_hole_damage_if_needed(px, py, pz):
-    ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(px, py, pz)
-    if kind != "BH" or hole is None:
-        return 0
-
-    core = float(hole["core_r"])
-    zone_r = core * BH_DAMAGE_ZONE_MULT
-    if dist_raw > zone_r:
-        return 0
-
-    t = 1.0 - (dist_raw / max(1e-6, zone_r))
-    t = clamp(t, 0.0, 1.0)
-
-    dmg_per_sec = BH_DMG_MIN_PER_SEC + t * (BH_DMG_MAX_PER_SEC - BH_DMG_MIN_PER_SEC)
-    dmg_per_frame = dmg_per_sec / float(FPS_ASSUMED)
-    return max(1, int(round(dmg_per_frame)))
-
-# --------------------------
-# Scoreboard + Game Over helpers
-# --------------------------
-def _record_score_on_game_over():
-    global last_round_score, top5_scores, _scoreboard_locked
-    if _scoreboard_locked:
-        return
-    _scoreboard_locked = True
-
-    last_round_score = int(player_score)
-    top5_scores.append(last_round_score)
-    top5_scores.sort(reverse=True)
-    top5_scores[:] = top5_scores[:5]
-
-def _trigger_game_over():
-    global game_over, controls_disabled
-    if game_over:
-        return
-    game_over = True
-    controls_disabled = True
-    _record_score_on_game_over()
-
-def _apply_hole_physics():
-    global vel_x, vel_y, vel_z
-    global player_life
-
-    if game_over:
-        return
-
-    dt = 1.0 / float(FPS_ASSUMED)
-
-    # player accel
-    ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(player_x, player_y, player_z)
-    vel_x += ax * dt
-    vel_y += ay * dt
-    vel_z += az * dt
-
-    # player BH damage
-    dmg = _apply_black_hole_damage_if_needed(player_x, player_y, player_z)
-    if dmg > 0:
-        player_life = max(0, player_life - dmg)
-        if player_life <= 0:
-            _trigger_game_over()
-
-    # player bullets
-    for b in player_bullets:
-        bx, by, bz = b[0], b[1], b[2]
-        ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(bx, by, bz)
-        b[3] += ax * dt
-        b[4] += ay * dt
-        b[5] += az * dt
-
-    # enemy bullets
-    for b in enemy_bullets:
-        bx, by, bz = b[0], b[1], b[2]
-        ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(bx, by, bz)
-        b[3] += ax * dt
-        b[4] += ay * dt
-        b[5] += az * dt
-
-    # enemies (NO score points when BH kills them)
-    keep_enemies = []
-    for e in enemies:
-        ex, ey, ez = e[0], e[1], e[2]
-
-        ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(ex, ey, ez)
-        ex = clamp(ex + ax * dt * 18.0, WORLD_MIN, WORLD_MAX)
-        ey = clamp(ey + ay * dt * 18.0, WORLD_MIN, WORLD_MAX)
-        ez = clamp(ez + az * dt * 18.0, WORLD_Z_MIN, WORLD_Z_MAX)
-        e[0], e[1], e[2] = ex, ey, ez
-
-        dmg = _apply_black_hole_damage_if_needed(ex, ey, ez)
-        if dmg > 0:
-            e[6] -= dmg
-            if e[6] <= 0:
-                register_enemy_kill()  # upgrades only
-                continue
-
-        keep_enemies.append(e)
-
-    enemies[:] = keep_enemies
-
-# ------------------------------------------------------------
-# Rocks
-# ------------------------------------------------------------
-ROCK_COUNT = 40
-ROCK_DRIFT_MAX = 0.12
-ROCK_ROT_SPEED = 0.12
-
-ROCK_SCALE_MIN = 0.6
-ROCK_SCALE_MAX = 2.0
-ROCK_HP_MIN = 30
-ROCK_HP_MAX = 70
-
-rocks_destroyed = 0
-ROCK_HIT_COOLDOWN_FRAMES = 30
-
-def _rock_scale_and_hp():
-    s = random.uniform(ROCK_SCALE_MIN, ROCK_SCALE_MAX)
-    t = (s - ROCK_SCALE_MIN) / max(0.0001, (ROCK_SCALE_MAX - ROCK_SCALE_MIN))
-    hp = int(ROCK_HP_MIN + t * (ROCK_HP_MAX - ROCK_HP_MIN))
-    return s, hp
-
-# ------------------------------------------------------------
-# Holes counts
-# ------------------------------------------------------------
-BLACK_HOLE_COUNT = 5
-WHITE_HOLE_COUNT = 5
-WORMHOLE_COUNT = 5
-
-BLACK_HOLE_MIN_R = 20
-BLACK_HOLE_MAX_R = 45
-BH_PARTICLES = 80
-
-WHITE_HOLE_MIN_R = 22
-WHITE_HOLE_MAX_R = 50
-WH_PARTICLES = 70
-
-WORMHOLE_MIN_R = 28
-WORMHOLE_MAX_R = 55
-WORM_RINGS = 14
-WORM_SPARKS = 120
-
-# ------------------------------------------------------------
-# Wormhole teleport
-# ------------------------------------------------------------
-WORMHOLE_TELEPORT_COOLDOWN_SEC = 5.0
-FPS_WORM = 60.0
-WORMHOLE_TELEPORT_COOLDOWN_FRAMES = int(WORMHOLE_TELEPORT_COOLDOWN_SEC * FPS_WORM)
-wormhole_tp_cd = 0
-
-SPAWN_MARGIN_ROCK = 150
-SPAWN_MARGIN_BH = 350
-SPAWN_MARGIN_WH = 350
-SPAWN_MARGIN_WORM = 350
-
-# ============================================================
-# HOLE SPACING (UPDATED BIG TIME)
-# ============================================================
-# 1) visual/collision spacing between hole bodies / rings
-HOLE_COLLISION_BUFFER = 260.0   # was effectively ~120; now much larger
-
-# 2) influence-zone spacing (prevents BH/WH influence overlap traps)
-HOLE_INFLUENCE_BUFFER = 320.0   # extra clearance beyond influence radii sum
-
-PLAYER_SAFE_RADIUS = 650.0
-
-# harder constraints => more tries
-MAX_SPAWN_TRIES = 25000
-
-# ------------------------------------------------------------
-# Enemy vs Player collision
-# ------------------------------------------------------------
-def _update_enemy_player_collisions():
-    global player_life
-    if game_over:
-        return
-
-    keep = []
-    for e in enemies:
-        ex, ey, ez, ang, cd, s, ehp = e
-        dx = player_x - ex
-        dy = player_y - ey
-        dz = player_z - ez
-
-        rr = SHIP_COLLISION_R + (ENEMY_HIT_R * s)
-        if (dx*dx + dy*dy + dz*dz) <= (rr * rr):
-            player_life = max(0, player_life - int(ehp))
-            if player_life <= 0:
-                _trigger_game_over()
-            continue
-
-        keep.append(e)
-
-    enemies[:] = keep
-
-# ==========================
-# Spawning helpers
-# ==========================
-def _rand_spawn_near_player():
-    ang = random.uniform(0.0, 2.0 * math.pi)
-    rad = random.uniform(ENEMY_SPAWN_RADIUS_MIN, ENEMY_SPAWN_RADIUS_MAX)
-    z = random.uniform(WORLD_Z_MIN + 80, WORLD_Z_MAX - 80)
-    x = player_x + math.cos(ang) * rad
-    y = player_y + math.sin(ang) * rad
-    x = clamp(x, WORLD_MIN + 120, WORLD_MAX - 120)
-    y = clamp(y, WORLD_MIN + 120, WORLD_MAX - 120)
-    return x, y, z
-
-# ==========================
-# Enemies
-# ==========================
-def _target_enemy_count():
-    lvl = clamp(int(ship_level), 1, 5)
-    return ENEMY_COUNT_BY_SHIP_LEVEL.get(lvl, 5)
-
-def init_enemies():
-    enemies.clear()
-    enemy_bullets.clear()
-    target = _target_enemy_count()
-    for _ in range(target):
-        x, y, z = _rand_spawn_near_player()
-        s, hp = _enemy_scale_and_hp()
-        enemies.append([x, y, z, 0.0, random.randint(0, ENEMY_FIRE_COOLDOWN_FRAMES), s, hp])
-
-def _ensure_enemies_alive():
-    target = _target_enemy_count()
-    while len(enemies) < target:
-        x, y, z = _rand_spawn_near_player()
-        s, hp = _enemy_scale_and_hp()
-        enemies.append([x, y, z, 0.0, ENEMY_FIRE_COOLDOWN_FRAMES, s, hp])
-    while len(enemies) > target:
-        enemies.pop()
-
-def _spawn_enemy_bullet(ex, ey, ez):
-    dx = player_x - ex
-    dy = player_y - ey
-    dz = player_z - ez
-    d2 = dx*dx + dy*dy + dz*dz
-    if d2 < 1.0:
-        return
-    d = math.sqrt(d2)
-    vx = (dx / d) * ENEMY_BULLET_SPEED
-    vy = (dy / d) * ENEMY_BULLET_SPEED
-    vz = (dz / d) * ENEMY_BULLET_SPEED
-    enemy_bullets.append([ex, ey, ez, vx, vy, vz, ENEMY_BULLET_LIFE_FRAMES])
-
-def _update_enemies_and_fire():
-    if game_over:
-        return
-
-    for e in enemies:
-        ex, ey, ez, ang, cd, s, hp = e
-
-        dx = player_x - ex
-        dy = player_y - ey
-        dz = player_z - ez
-
-        dist3_ = math.sqrt(dx*dx + dy*dy + dz*dz) if (dx*dx + dy*dy + dz*dz) > 0.0001 else 0.0
-        dist_xy2 = dx*dx + dy*dy
-
-        if dist_xy2 > 0.001:
-            e[3] = math.degrees(math.atan2(dy, dx))
-
-        if dist3_ > ENEMY_STOP_DIST:
-            inv = 1.0 / dist3_
-            ex += dx * inv * ENEMY_SPEED
-            ey += dy * inv * ENEMY_SPEED
-            ez += dz * inv * ENEMY_SPEED
-
-            ex = clamp(ex, WORLD_MIN, WORLD_MAX)
-            ey = clamp(ey, WORLD_MIN, WORLD_MAX)
-            ez = clamp(ez, WORLD_Z_MIN, WORLD_Z_MAX)
-
-            e[0], e[1], e[2] = ex, ey, ez
-
-        if e[4] > 0:
-            e[4] -= 1
-
-        if dist3_ <= ENEMY_FIRE_RANGE and e[4] == 0:
-            _spawn_enemy_bullet(ex, ey, ez)
-            e[4] = ENEMY_FIRE_COOLDOWN_FRAMES
-
-def _update_enemy_bullets_and_hit_player():
-    global player_life
-    if game_over:
-        return
-
-    keep = []
-    hit_r = SHIP_COLLISION_R + 10.0
-
-    for b in enemy_bullets:
-        x, y, z, vx, vy, vz, life = b
-        x += vx
-        y += vy
-        z += vz
-        life -= 1
-
-        if life <= 0:
-            continue
-        if x < WORLD_MIN or x > WORLD_MAX or y < WORLD_MIN or y > WORLD_MAX or z < WORLD_Z_MIN or z > WORLD_Z_MAX:
-            continue
-
-        dx = x - player_x
-        dy = y - player_y
-        dz = z - player_z
-        if (dx*dx + dy*dy + dz*dz) <= (hit_r * hit_r):
-            player_life = max(0, player_life - ENEMY_BULLET_DAMAGE)
-            if player_life <= 0:
-                _trigger_game_over()
-            continue
-
-        keep.append([x, y, z, vx, vy, vz, life])
-
-    enemy_bullets[:] = keep
-
-# ==========================
-# Player bullets
-# ==========================
 def _spawn_player_bullet():
     global player_bullet_cd
 
@@ -829,9 +286,221 @@ def draw_player_bullets():
         glutSolidCube(10)
         glPopMatrix()
 
-# ==========================
-# Rocks / Damage
-# ==========================
+
+#Enemy/Alien ship
+ENEMY_COUNT_BY_SHIP_LEVEL = {1: 5, 2: 6, 3: 8, 4: 10, 5: 13}
+
+ENEMY_SPAWN_RADIUS_MIN = 900.0
+ENEMY_SPAWN_RADIUS_MAX = 1500.0
+ENEMY_SPEED = 1
+ENEMY_STOP_DIST = 380.0
+
+ENEMY_FIRE_RANGE = 850.0
+ENEMY_FIRE_COOLDOWN_FRAMES = 60
+ENEMY_BULLET_SPEED = 10.0
+ENEMY_BULLET_DAMAGE = 40
+ENEMY_BULLET_LIFE_FRAMES = 180
+
+enemies = []
+enemy_bullets = []
+
+ENEMY_SCALE_MIN = 0.8
+ENEMY_SCALE_MAX = 1.5
+ENEMY_HP_MIN = 40
+ENEMY_HP_MAX = 80
+
+def _enemy_scale_and_hp():
+    s = random.uniform(ENEMY_SCALE_MIN, ENEMY_SCALE_MAX)
+    t = (s - ENEMY_SCALE_MIN) / max(0.0001, (ENEMY_SCALE_MAX - ENEMY_SCALE_MIN))
+    hp = int(ENEMY_HP_MIN + t * (ENEMY_HP_MAX - ENEMY_HP_MIN))
+    return s, hp
+
+def _rand_spawn_near_player():
+    ang = random.uniform(0.0, 2.0 * math.pi)
+    rad = random.uniform(ENEMY_SPAWN_RADIUS_MIN, ENEMY_SPAWN_RADIUS_MAX)
+    z = random.uniform(WORLD_Z_MIN + 80, WORLD_Z_MAX - 80)
+    x = player_x + math.cos(ang) * rad
+    y = player_y + math.sin(ang) * rad
+    x = clamp(x, WORLD_MIN + 120, WORLD_MAX - 120)
+    y = clamp(y, WORLD_MIN + 120, WORLD_MAX - 120)
+    return x, y, z
+
+
+def _update_enemy_player_collisions():
+    global player_life
+    if game_over:
+        return
+
+    keep = []
+    for e in enemies:
+        ex, ey, ez, ang, cd, s, ehp = e
+        dx = player_x - ex
+        dy = player_y - ey
+        dz = player_z - ez
+
+        rr = SHIP_COLLISION_R + (ENEMY_HIT_R * s)
+        if (dx*dx + dy*dy + dz*dz) <= (rr * rr):
+            player_life = max(0, player_life - int(ehp))
+            if player_life <= 0:
+                _trigger_game_over()
+            continue
+
+        keep.append(e)
+
+    enemies[:] = keep
+
+def _target_enemy_count():
+    lvl = clamp(int(ship_level), 1, 5)
+    return ENEMY_COUNT_BY_SHIP_LEVEL.get(lvl, 5)
+
+def init_enemies():
+    enemies.clear()
+    enemy_bullets.clear()
+    target = _target_enemy_count()
+    for _ in range(target):
+        x, y, z = _rand_spawn_near_player()
+        s, hp = _enemy_scale_and_hp()
+        enemies.append([x, y, z, 0.0, random.randint(0, ENEMY_FIRE_COOLDOWN_FRAMES), s, hp])
+
+def _ensure_enemies_alive():
+    target = _target_enemy_count()
+    while len(enemies) < target:
+        x, y, z = _rand_spawn_near_player()
+        s, hp = _enemy_scale_and_hp()
+        enemies.append([x, y, z, 0.0, ENEMY_FIRE_COOLDOWN_FRAMES, s, hp])
+    while len(enemies) > target:
+        enemies.pop()
+
+def _spawn_enemy_bullet(ex, ey, ez):
+    dx = player_x - ex
+    dy = player_y - ey
+    dz = player_z - ez
+    d2 = dx*dx + dy*dy + dz*dz
+    if d2 < 1.0:
+        return
+    d = math.sqrt(d2)
+    vx = (dx / d) * ENEMY_BULLET_SPEED
+    vy = (dy / d) * ENEMY_BULLET_SPEED
+    vz = (dz / d) * ENEMY_BULLET_SPEED
+    enemy_bullets.append([ex, ey, ez, vx, vy, vz, ENEMY_BULLET_LIFE_FRAMES])
+
+def _update_enemies_and_fire():
+    if game_over:
+        return
+
+    for e in enemies:
+        ex, ey, ez, ang, cd, s, hp = e
+
+        dx = player_x - ex
+        dy = player_y - ey
+        dz = player_z - ez
+
+        dist3_ = math.sqrt(dx*dx + dy*dy + dz*dz) if (dx*dx + dy*dy + dz*dz) > 0.0001 else 0.0
+        dist_xy2 = dx*dx + dy*dy
+
+        if dist_xy2 > 0.001:
+            e[3] = math.degrees(math.atan2(dy, dx))
+
+        if dist3_ > ENEMY_STOP_DIST:
+            inv = 1.0 / dist3_
+            ex += dx * inv * ENEMY_SPEED
+            ey += dy * inv * ENEMY_SPEED
+            ez += dz * inv * ENEMY_SPEED
+
+            ex = clamp(ex, WORLD_MIN, WORLD_MAX)
+            ey = clamp(ey, WORLD_MIN, WORLD_MAX)
+            ez = clamp(ez, WORLD_Z_MIN, WORLD_Z_MAX)
+
+            e[0], e[1], e[2] = ex, ey, ez
+
+        if e[4] > 0:
+            e[4] -= 1
+
+        if dist3_ <= ENEMY_FIRE_RANGE and e[4] == 0:
+            _spawn_enemy_bullet(ex, ey, ez)
+            e[4] = ENEMY_FIRE_COOLDOWN_FRAMES
+
+def _update_enemy_bullets_and_hit_player():
+    global player_life
+    if game_over:
+        return
+
+    keep = []
+    hit_r = SHIP_COLLISION_R + 10.0
+
+    for b in enemy_bullets:
+        x, y, z, vx, vy, vz, life = b
+        x += vx
+        y += vy
+        z += vz
+        life -= 1
+
+        if life <= 0:
+            continue
+        if x < WORLD_MIN or x > WORLD_MAX or y < WORLD_MIN or y > WORLD_MAX or z < WORLD_Z_MIN or z > WORLD_Z_MAX:
+            continue
+
+        dx = x - player_x
+        dy = y - player_y
+        dz = z - player_z
+        if (dx*dx + dy*dy + dz*dz) <= (hit_r * hit_r):
+            player_life = max(0, player_life - ENEMY_BULLET_DAMAGE)
+            if player_life <= 0:
+                _trigger_game_over()
+            continue
+
+        keep.append([x, y, z, vx, vy, vz, life])
+
+    enemy_bullets[:] = keep
+
+#Objects
+rocks = []
+black_holes = []
+white_holes = []
+wormholes = []
+
+
+#Rocks
+ROCK_COUNT = 40
+ROCK_DRIFT_MAX = 0.12
+ROCK_ROT_SPEED = 0.12
+
+ROCK_SCALE_MIN = 0.6
+ROCK_SCALE_MAX = 2.0
+ROCK_HP_MIN = 30
+ROCK_HP_MAX = 70
+
+rocks_destroyed = 0
+ROCK_HIT_COOLDOWN_FRAMES = 30
+
+def _rock_scale_and_hp():
+    s = random.uniform(ROCK_SCALE_MIN, ROCK_SCALE_MAX)
+    t = (s - ROCK_SCALE_MIN) / max(0.0001, (ROCK_SCALE_MAX - ROCK_SCALE_MIN))
+    hp = int(ROCK_HP_MIN + t * (ROCK_HP_MAX - ROCK_HP_MIN))
+    return s, hp
+
+def init_rocks():
+    rocks.clear()
+    player_r = SHIP_COLLISION_R
+
+    for _ in range(ROCK_COUNT):
+        x = random.uniform(WORLD_MIN + SPAWN_MARGIN_ROCK, WORLD_MAX - SPAWN_MARGIN_ROCK)
+        y = random.uniform(WORLD_MIN + SPAWN_MARGIN_ROCK, WORLD_MAX - SPAWN_MARGIN_ROCK)
+        z = random.uniform(WORLD_Z_MIN + 80, WORLD_Z_MAX - 80)
+
+        s, hp = _rock_scale_and_hp()
+        rad = player_r * s
+
+        vx = random.uniform(-ROCK_DRIFT_MAX, ROCK_DRIFT_MAX)
+        vy = random.uniform(-ROCK_DRIFT_MAX, ROCK_DRIFT_MAX)
+        vz = random.uniform(-ROCK_DRIFT_MAX * 0.6, ROCK_DRIFT_MAX * 0.6)
+
+        spin = random.uniform(-ROCK_ROT_SPEED, ROCK_ROT_SPEED)
+        ang = random.uniform(0, 360)
+
+        hit_cd = 0
+        rocks.append([x, y, z, rad, vx, vy, vz, ang, spin, hp, hit_cd, s])
+
 def damage_rock(rock_index, dmg=1):
     global rocks_destroyed
 
@@ -898,96 +567,52 @@ def _resolve_ship_rock_collision(r):
             vel_y -= vdot * ny
             vel_z -= vdot * nz
 
-# ==========================
-# Hole spawning helpers (UPDATED)
-# ==========================
-def _collect_all_hole_centers_and_radii():
-    items = []
-    for bh in black_holes:
-        x, y, z = bh["pos"]
-        core = float(bh["core_r"])
-        r_eff = core * 3.2
-        r_inf = core * HOLE_EFFECT_RANGE_MULT
-        items.append((x, y, z, r_eff, r_inf))
+#Holes
+BLACK_HOLE_COUNT = 5
+WHITE_HOLE_COUNT = 5
+WORMHOLE_COUNT = 5
 
-    for wh in white_holes:
-        x, y, z = wh["pos"]
-        core = float(wh["core_r"])
-        r_eff = core * 3.2
-        r_inf = core * HOLE_EFFECT_RANGE_MULT
-        items.append((x, y, z, r_eff, r_inf))
+BLACK_HOLE_MIN_R = 20
+BLACK_HOLE_MAX_R = 45
+BH_PARTICLES = 80
 
-    for w in wormholes:
-        x, y, z = w["pos"]
-        core = float(w["core_r"])
-        r_eff = core * 3.1
-        # wormholes don't pull/push, but we still keep them far so space isn't cluttered
-        r_inf = core * 6.0
-        items.append((x, y, z, r_eff, r_inf))
+WHITE_HOLE_MIN_R = 22
+WHITE_HOLE_MAX_R = 50
+WH_PARTICLES = 70
 
-    return items
+WORMHOLE_MIN_R = 28
+WORMHOLE_MAX_R = 55
+WORM_RINGS = 14
+WORM_SPARKS = 120
 
-def _find_non_overlapping_position(spawn_margin, new_r_eff, new_r_inf):
-    existing = _collect_all_hole_centers_and_radii()
+FPS_ASSUMED = 60.0
+HOLE_SOFTENING = 220.0
+BH_PULL_STRENGTH = 9000.0
+WH_PUSH_STRENGTH = 9000.0
 
-    lo = WORLD_MIN + spawn_margin
-    hi = WORLD_MAX - spawn_margin
-    zlo = WORLD_Z_MIN + spawn_margin * 0.25
-    zhi = WORLD_Z_MAX - spawn_margin * 0.25
+HOLE_EFFECT_RANGE_MULT = 15.00
+MAX_HOLE_ACCEL = 55.0
 
-    for _ in range(MAX_SPAWN_TRIES):
-        x = random.uniform(lo, hi)
-        y = random.uniform(lo, hi)
-        z = random.uniform(zlo, zhi)
+BH_DAMAGE_ZONE_MULT = 3.0
+BH_DMG_MIN_PER_SEC = 80.0
+BH_DMG_MAX_PER_SEC = 150.0
 
-        if dist3_2((x, y, z), (player_x, player_y, player_z)) < PLAYER_SAFE_RADIUS * PLAYER_SAFE_RADIUS:
-            continue
+HOLE_COLLISION_BUFFER = 260.0
+HOLE_INFLUENCE_BUFFER = 320.0
+PLAYER_SAFE_RADIUS = 650.0
+MAX_SPAWN_TRIES = 25000
 
-        ok = True
-        for ex, ey, ez, er_eff, er_inf in existing:
-            # visual spacing
-            min_sep_visual = (er_eff + new_r_eff + HOLE_COLLISION_BUFFER)
 
-            # influence spacing (prevents BH/WH overlap trap zones)
-            min_sep_infl = (er_inf + new_r_inf + HOLE_INFLUENCE_BUFFER)
+#Wormhole teleport
+WORMHOLE_TELEPORT_COOLDOWN_SEC = 5.0
+FPS_WORM = 60.0
+WORMHOLE_TELEPORT_COOLDOWN_FRAMES = int(WORMHOLE_TELEPORT_COOLDOWN_SEC * FPS_WORM)
+wormhole_tp_cd = 0
 
-            # enforce the stricter of the two
-            min_sep = max(min_sep_visual, min_sep_infl)
-
-            if dist3_2((x, y, z), (ex, ey, ez)) < (min_sep * min_sep):
-                ok = False
-                break
-
-        if ok:
-            return x, y, z
-
-    # fallback (still bounded) - but constraints usually succeed with high tries
-    return random.uniform(lo, hi), random.uniform(lo, hi), random.uniform(zlo, zhi)
-
-# ==========================
-# Spawn functions
-# ==========================
-def init_rocks():
-    rocks.clear()
-    player_r = SHIP_COLLISION_R
-
-    for _ in range(ROCK_COUNT):
-        x = random.uniform(WORLD_MIN + SPAWN_MARGIN_ROCK, WORLD_MAX - SPAWN_MARGIN_ROCK)
-        y = random.uniform(WORLD_MIN + SPAWN_MARGIN_ROCK, WORLD_MAX - SPAWN_MARGIN_ROCK)
-        z = random.uniform(WORLD_Z_MIN + 80, WORLD_Z_MAX - 80)
-
-        s, hp = _rock_scale_and_hp()
-        rad = player_r * s
-
-        vx = random.uniform(-ROCK_DRIFT_MAX, ROCK_DRIFT_MAX)
-        vy = random.uniform(-ROCK_DRIFT_MAX, ROCK_DRIFT_MAX)
-        vz = random.uniform(-ROCK_DRIFT_MAX * 0.6, ROCK_DRIFT_MAX * 0.6)
-
-        spin = random.uniform(-ROCK_ROT_SPEED, ROCK_ROT_SPEED)
-        ang = random.uniform(0, 360)
-
-        hit_cd = 0
-        rocks.append([x, y, z, rad, vx, vy, vz, ang, spin, hp, hit_cd, s])
+SPAWN_MARGIN_ROCK = 150
+SPAWN_MARGIN_BH = 350
+SPAWN_MARGIN_WH = 350
+SPAWN_MARGIN_WORM = 350
 
 def init_black_holes():
     black_holes.clear()
@@ -1053,9 +678,278 @@ def init_wormholes():
 
         wormholes.append({"pos": [x, y, z], "core_r": core_r, "tilt": tilt, "twist": twist, "sparks": sparks})
 
-# ==========================
+def _update_wormhole_teleport():
+    global player_x, player_y, player_z
+    global wormhole_tp_cd
+
+    if wormhole_tp_cd > 0:
+        return
+    if len(wormholes) < 2:
+        return
+
+    for i, w in enumerate(wormholes):
+        wx, wy, wz = w["pos"]
+        wr = w["core_r"]
+
+        dx = player_x - wx
+        dy = player_y - wy
+        dz = player_z - wz
+
+        rr = wr + SHIP_COLLISION_R
+        if (dx*dx + dy*dy + dz*dz) <= (rr * rr):
+            choices = [j for j in range(len(wormholes)) if j != i]
+            j = random.choice(choices)
+            dest = wormholes[j]
+            tx, ty, tz = dest["pos"]
+            tr = dest["core_r"]
+
+            rad = math.radians(player_angle)
+            fx, fy = math.cos(rad), math.sin(rad)
+
+            push_out = tr + SHIP_COLLISION_R + 25.0
+            player_x = tx + fx * push_out
+            player_y = ty + fy * push_out
+            player_z = tz
+
+            player_x = clamp(player_x, WORLD_MIN, WORLD_MAX)
+            player_y = clamp(player_y, WORLD_MIN, WORLD_MAX)
+            player_z = clamp(player_z, WORLD_Z_MIN, WORLD_Z_MAX)
+
+            wormhole_tp_cd = WORMHOLE_TELEPORT_COOLDOWN_FRAMES
+            return
+
+def _collect_all_hole_centers_and_radii():
+    items = []
+    for bh in black_holes:
+        x, y, z = bh["pos"]
+        core = float(bh["core_r"])
+        r_eff = core * 3.2
+        r_inf = core * HOLE_EFFECT_RANGE_MULT
+        items.append((x, y, z, r_eff, r_inf))
+
+    for wh in white_holes:
+        x, y, z = wh["pos"]
+        core = float(wh["core_r"])
+        r_eff = core * 3.2
+        r_inf = core * HOLE_EFFECT_RANGE_MULT
+        items.append((x, y, z, r_eff, r_inf))
+
+    for w in wormholes:
+        x, y, z = w["pos"]
+        core = float(w["core_r"])
+        r_eff = core * 3.1
+        r_inf = core * 6.0
+        items.append((x, y, z, r_eff, r_inf))
+
+    return items
+
+def _find_non_overlapping_position(spawn_margin, new_r_eff, new_r_inf):
+    existing = _collect_all_hole_centers_and_radii()
+
+    lo = WORLD_MIN + spawn_margin
+    hi = WORLD_MAX - spawn_margin
+    zlo = WORLD_Z_MIN + spawn_margin * 0.25
+    zhi = WORLD_Z_MAX - spawn_margin * 0.25
+
+    for _ in range(MAX_SPAWN_TRIES):
+        x = random.uniform(lo, hi)
+        y = random.uniform(lo, hi)
+        z = random.uniform(zlo, zhi)
+
+        if dist3_2((x, y, z), (player_x, player_y, player_z)) < PLAYER_SAFE_RADIUS * PLAYER_SAFE_RADIUS:
+            continue
+
+        ok = True
+        for ex, ey, ez, er_eff, er_inf in existing:
+            min_sep_visual = (er_eff + new_r_eff + HOLE_COLLISION_BUFFER)
+
+            min_sep_infl = (er_inf + new_r_inf + HOLE_INFLUENCE_BUFFER)
+
+            min_sep = max(min_sep_visual, min_sep_infl)
+
+            if dist3_2((x, y, z), (ex, ey, ez)) < (min_sep * min_sep):
+                ok = False
+                break
+
+        if ok:
+            return x, y, z
+
+    return random.uniform(lo, hi), random.uniform(lo, hi), random.uniform(zlo, zhi)
+
+#Black/white hole Physics
+def _hole_accel_at_point(px, py, pz):
+    best_kind = None
+    best_hole = None
+    best_ax = best_ay = best_az = 0.0
+    best_mag2 = 0.0
+    best_dist_raw = 1e9
+
+    #Black holes pull
+    for bh in black_holes:
+        bx, by, bz = bh["pos"]
+        core = float(bh["core_r"])
+
+        dx = bx - px
+        dy = by - py
+        dz = bz - pz
+
+        d2_raw = dx*dx + dy*dy + dz*dz
+        d_raw = math.sqrt(d2_raw) if d2_raw > 1e-9 else 0.0
+
+        hole_effect_range = core * HOLE_EFFECT_RANGE_MULT
+        if d_raw > hole_effect_range:
+            continue
+
+        d2 = d2_raw + (HOLE_SOFTENING * HOLE_SOFTENING)
+        d = math.sqrt(d2)
+
+        a = (BH_PULL_STRENGTH * (core * core)) / d2
+        if a > MAX_HOLE_ACCEL:
+            a = MAX_HOLE_ACCEL
+
+        ax = (dx / d) * a
+        ay = (dy / d) * a
+        az = (dz / d) * a
+
+        mag2 = ax*ax + ay*ay + az*az
+        if mag2 > best_mag2:
+            best_mag2 = mag2
+            best_kind = "BH"
+            best_hole = bh
+            best_ax, best_ay, best_az = ax, ay, az
+            best_dist_raw = d_raw
+
+    #White holes repel
+    for wh in white_holes:
+        wx, wy, wz = wh["pos"]
+        core = float(wh["core_r"])
+
+        dx = px - wx
+        dy = py - wy
+        dz = pz - wz
+
+        d2_raw = dx*dx + dy*dy + dz*dz
+        d_raw = math.sqrt(d2_raw) if d2_raw > 1e-9 else 0.0
+
+        hole_effect_range = core * HOLE_EFFECT_RANGE_MULT
+        if d_raw > hole_effect_range:
+            continue
+
+        d2 = d2_raw + (HOLE_SOFTENING * HOLE_SOFTENING)
+        d = math.sqrt(d2)
+
+        a = (WH_PUSH_STRENGTH * (core * core)) / d2
+        if a > MAX_HOLE_ACCEL:
+            a = MAX_HOLE_ACCEL
+
+        ax = (dx / d) * a
+        ay = (dy / d) * a
+        az = (dz / d) * a
+
+        mag2 = ax*ax + ay*ay + az*az
+        if mag2 > best_mag2:
+            best_mag2 = mag2
+            best_kind = "WH"
+            best_hole = wh
+            best_ax, best_ay, best_az = ax, ay, az
+            best_dist_raw = d_raw
+
+    if best_kind is None:
+        return 0.0, 0.0, 0.0, None, None, 0.0
+    return best_ax, best_ay, best_az, best_kind, best_hole, best_dist_raw
+
+def _apply_black_hole_damage_if_needed(px, py, pz):
+    ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(px, py, pz)
+    if kind != "BH" or hole is None:
+        return 0
+
+    core = float(hole["core_r"])
+    zone_r = core * BH_DAMAGE_ZONE_MULT
+    if dist_raw > zone_r:
+        return 0
+
+    t = 1.0 - (dist_raw / max(1e-6, zone_r))
+    t = clamp(t, 0.0, 1.0)
+
+    dmg_per_sec = BH_DMG_MIN_PER_SEC + t * (BH_DMG_MAX_PER_SEC - BH_DMG_MIN_PER_SEC)
+    dmg_per_frame = dmg_per_sec / float(FPS_ASSUMED)
+    return max(1, int(round(dmg_per_frame)))
+
+
+def _apply_hole_physics():
+    global vel_x, vel_y, vel_z
+    global player_life
+
+    if game_over:
+        return
+
+    dt = 1.0 / float(FPS_ASSUMED)
+
+    #Player acceleration
+    ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(player_x, player_y, player_z)
+    vel_x += ax * dt
+    vel_y += ay * dt
+    vel_z += az * dt
+
+    #Player Black hole damage
+    dmg = _apply_black_hole_damage_if_needed(player_x, player_y, player_z)
+    if dmg > 0:
+        player_life = max(0, player_life - dmg)
+        if player_life <= 0:
+            _trigger_game_over()
+
+    #Player bullets
+    for b in player_bullets:
+        bx, by, bz = b[0], b[1], b[2]
+        ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(bx, by, bz)
+        b[3] += ax * dt
+        b[4] += ay * dt
+        b[5] += az * dt
+
+    #Enemy bullets
+    for b in enemy_bullets:
+        bx, by, bz = b[0], b[1], b[2]
+        ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(bx, by, bz)
+        b[3] += ax * dt
+        b[4] += ay * dt
+        b[5] += az * dt
+
+    keep_enemies = []
+    for e in enemies:
+        ex, ey, ez = e[0], e[1], e[2]
+
+        ax, ay, az, kind, hole, dist_raw = _hole_accel_at_point(ex, ey, ez)
+        ex = clamp(ex + ax * dt * 18.0, WORLD_MIN, WORLD_MAX)
+        ey = clamp(ey + ay * dt * 18.0, WORLD_MIN, WORLD_MAX)
+        ez = clamp(ez + az * dt * 18.0, WORLD_Z_MIN, WORLD_Z_MAX)
+        e[0], e[1], e[2] = ex, ey, ez
+
+        dmg = _apply_black_hole_damage_if_needed(ex, ey, ez)
+        if dmg > 0:
+            e[6] -= dmg
+            if e[6] <= 0:
+                register_enemy_kill()  # upgrades only
+                continue
+
+        keep_enemies.append(e)
+
+    enemies[:] = keep_enemies
+
+
+#Scoreboard
+def _record_score_on_game_over():
+    global last_round_score, top5_scores, _scoreboard_locked
+    if _scoreboard_locked:
+        return
+    _scoreboard_locked = True
+
+    last_round_score = int(player_score)
+    top5_scores.append(last_round_score)
+    top5_scores.sort(reverse=True)
+    top5_scores[:] = top5_scores[:5]
+
+
 # Draw environment
-# ==========================
 def draw_rocks():
     quad = gluNewQuadric()
     for r in rocks:
@@ -1212,9 +1106,7 @@ def draw_wormholes():
         gluSphere(gluNewQuadric(), core_r * 0.55, 20, 20)
         glPopMatrix()
 
-# ==========================
-# Enemy ship model / drawing
-# ==========================
+# Enemy ship
 def draw_enemy_ship_model():
     quad = gluNewQuadric()
 
@@ -1294,9 +1186,6 @@ def draw_enemy_bullets():
         glutSolidCube(10)
         glPopMatrix()
 
-# ==========================
-# Ship drawing (Third Person)
-# ==========================
 def draw_ship_third_person():
     glPushMatrix()
     glTranslatef(player_x, player_y, player_z)
@@ -1426,9 +1315,6 @@ def draw_ship_third_person():
 
     glPopMatrix()
 
-# ==========================
-# First-person cockpit (Depth-safe overlay)
-# ==========================
 def draw_first_person_helm_and_hands():
     glClear(GL_DEPTH_BUFFER_BIT)
     glDisable(GL_DEPTH_TEST)
@@ -1488,16 +1374,60 @@ def draw_first_person_helm_and_hands():
     glPopMatrix()
     glEnable(GL_DEPTH_TEST)
 
-# ==========================
-# HUD helpers
-# ==========================
+# Helpers
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def dist3_2(a, b):
+    dx = a[0] - b[0]
+    dy = a[1] - b[1]
+    dz = a[2] - b[2]
+    return dx*dx + dy*dy + dz*dz
+
+def _draw_flat_disk(radius, height, slices=24):
+    quad = gluNewQuadric()
+    gluCylinder(quad, radius, radius, height, slices, 1)
+
+#Camera
+def setupCamera():
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    aspect = WIN_W / max(1.0, float(WIN_H))
+    gluPerspective(fovY, aspect, 0.1, 8000)
+
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+
+    rad = math.radians(player_angle)
+    fx, fy = math.cos(rad), math.sin(rad)
+
+    if not first_person:
+        cam_dist = 320.0
+        cam_up = 220.0
+        cam_x = player_x - fx * cam_dist
+        cam_y = player_y - fy * cam_dist
+        cam_z = player_z + cam_up
+        gluLookAt(cam_x, cam_y, cam_z, player_x, player_y, player_z, 0, 0, 1)
+    else:
+        gluLookAt(
+            player_x + fx * 20,
+            player_y + fy * 20,
+            player_z + 60,
+            player_x + fx * 300,
+            player_y + fy * 300,
+            player_z + 60,
+            0, 0, 1
+        )
+
+
+#HUD Helpers
 WIN_W, WIN_H = 1000, 800
 
 def set_ship_level(new_level):
     global ship_level, player_max_hp, player_life
     ship_level = clamp(int(new_level), 1, 5)
     player_max_hp = SHIP_STATS_BY_LEVEL[ship_level]["hp"]
-    player_life = player_max_hp  # heal to new max hp (per PDF)
+    player_life = player_max_hp
 
 def _ship_speed_mult():
     return SHIP_STATS_BY_LEVEL[clamp(int(ship_level), 1, 5)]["speed_mult"]
@@ -1553,7 +1483,7 @@ def draw_hud():
         "D = Rotate Right",
         "Q = Up  |  E = Down",
         "SPACE / Left Click = Fire",
-        "Right Click / V = Toggle POV",
+        "Right Click / V = POV",
         "R = Restart"
     ]
 
@@ -1564,7 +1494,6 @@ def draw_hud():
 
     _end_2d_overlay()
 
-    #Blue centered scoreboard after elimination
     if game_over:
         _begin_2d_overlay()
         glColor3f(0.2, 0.6, 1.0)
@@ -1597,42 +1526,8 @@ def draw_hud():
 
         _end_2d_overlay()
 
-# ==========================
-# Camera
-# ==========================
-def setupCamera():
-    glMatrixMode(GL_PROJECTION)
-    glLoadIdentity()
-    aspect = WIN_W / max(1.0, float(WIN_H))
-    gluPerspective(fovY, aspect, 0.1, 8000)
 
-    glMatrixMode(GL_MODELVIEW)
-    glLoadIdentity()
-
-    rad = math.radians(player_angle)
-    fx, fy = math.cos(rad), math.sin(rad)
-
-    if not first_person:
-        cam_dist = 320.0
-        cam_up = 220.0
-        cam_x = player_x - fx * cam_dist
-        cam_y = player_y - fy * cam_dist
-        cam_z = player_z + cam_up
-        gluLookAt(cam_x, cam_y, cam_z, player_x, player_y, player_z, 0, 0, 1)
-    else:
-        gluLookAt(
-            player_x + fx * 20,
-            player_y + fy * 20,
-            player_z + 60,
-            player_x + fx * 300,
-            player_y + fy * 300,
-            player_z + 60,
-            0, 0, 1
-        )
-
-# ==========================
-# Display
-# ==========================
+#Display
 def showScreen():
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glLoadIdentity()
@@ -1656,9 +1551,6 @@ def showScreen():
     draw_hud()
     glutSwapBuffers()
 
-# ==========================
-# Idle
-# ==========================
 def idle():
     global player_x, player_y, player_z
     global vel_x, vel_y, vel_z, player_angle
@@ -1727,7 +1619,7 @@ def idle():
     _apply_hole_physics()
     _update_wormhole_teleport()
 
-    # rocks drift + rotate
+    #rocks
     for r in rocks:
         r[0] += r[4]
         r[1] += r[5]
@@ -1787,9 +1679,14 @@ def idle():
 
     glutPostRedisplay()
 
-# ==========================
-# Input / Reset
-# ==========================
+def _trigger_game_over():
+    global game_over, controls_disabled
+    if game_over:
+        return
+    game_over = True
+    controls_disabled = True
+    _record_score_on_game_over()
+
 def reset_game():
     global player_x, player_y, player_z, player_angle
     global vel_x, vel_y, vel_z
@@ -1799,10 +1696,10 @@ def reset_game():
     global player_bullet_cd
     global enemy_kills_total, rocks_destroyed
     global wormhole_tp_cd
-    global _scoreboard_locked  #important: do NOT reset top5_scores/last_round_score
+    global _scoreboard_locked
 
     wormhole_tp_cd = 0
-    _scoreboard_locked = False  #allow scoreboard record next time
+    _scoreboard_locked = False
 
     player_x, player_y, player_z = 0.0, 0.0, 30.0
     player_angle = 0.0
@@ -1887,15 +1784,12 @@ def reshape(w, h):
     WIN_H = max(1, int(h))
     glViewport(0, 0, WIN_W, WIN_H)
 
-# ==========================
-# Main
-# ==========================
 def main():
     glutInit()
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
     glutInitWindowSize(1000, 800)
     glutInitWindowPosition(50, 50)
-    glutCreateWindow(b"Singularity Wars - 3D Spawn + Drifting Rocks")
+    glutCreateWindow(b"Singularity Wars")
 
     glEnable(GL_DEPTH_TEST)
     glClearColor(0, 0, 0, 1)
