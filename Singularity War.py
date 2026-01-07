@@ -32,6 +32,17 @@ gun_level = 1
 game_over = False
 controls_disabled = False
 
+#Game State
+game_paused = False
+difficulty = "Normal"  # Easy, Normal, Hard
+game_started = False
+
+#Visual Effects State
+damage_flash_frames = 0
+shield_pulse_frames = 0
+DAMAGE_FLASH_DURATION = 15
+SHIELD_PULSE_DURATION = 30
+
 #Ship
 SHIP_SCALE = 0.6
 SHIP_COLLISION_R = 45.0 * SHIP_SCALE
@@ -149,12 +160,17 @@ def _weapon_stats():
     lvl = clamp(int(gun_level), 1, 5)
     return WEAPON_STATS_BY_LEVEL.get(lvl, WEAPON_STATS_BY_LEVEL[1])
 
+def get_difficulty_setting(key):
+    return DIFFICULTY_SETTINGS[difficulty].get(key, 1.0)
+
 def _update_gun_level_from_kills():
     global gun_level
     lvl = 1
     for L, need in GUN_LEVEL_BY_TOTAL_KILLS:
         if enemy_kills_total >= need:
             lvl = L
+    if lvl != gun_level:
+        spawn_levelup_effect(player_x, player_y, player_z, 'gun')
     gun_level = lvl
 
 def register_enemy_kill():
@@ -220,6 +236,9 @@ def _spawn_player_bullet():
 
     player_bullets.append([sx, sy, sz, vx, vy, vz, life_frames, dmg])
     player_bullet_cd = _player_bullet_cooldown_frames()
+    
+    # Spawn muzzle flash
+    muzzle_flashes.append([sx, sy, sz, MUZZLE_FLASH_LIFE])
 
 def _update_player_bullets_and_hits():
     global player_score
@@ -263,7 +282,9 @@ def _update_player_bullets_and_hits():
             if (dx*dx + dy*dy + dz*dz) <= (rr * rr):
                 enemies[ei][6] -= dmg
                 if enemies[ei][6] <= 0:
-                    player_score += 25
+                    spawn_explosion(ex, ey, ez, 'enemy', s)
+                    score_gain = int(25 * get_difficulty_setting("score_mult"))
+                    player_score += score_gain
                     enemies.pop(ei)
                     register_enemy_kill()
                 hit = True
@@ -300,6 +321,30 @@ ENEMY_FIRE_COOLDOWN_FRAMES = 60
 ENEMY_BULLET_SPEED = 10.0
 ENEMY_BULLET_DAMAGE = 40
 ENEMY_BULLET_LIFE_FRAMES = 180
+
+DIFFICULTY_SETTINGS = {
+    "Easy": {
+        "enemy_damage_mult": 0.6,
+        "enemy_speed_mult": 0.7,
+        "enemy_fire_rate_mult": 1.5,
+        "player_damage_mult": 1.3,
+        "score_mult": 0.8
+    },
+    "Normal": {
+        "enemy_damage_mult": 1.0,
+        "enemy_speed_mult": 1.0,
+        "enemy_fire_rate_mult": 1.0,
+        "player_damage_mult": 1.0,
+        "score_mult": 1.0
+    },
+    "Hard": {
+        "enemy_damage_mult": 1.5,
+        "enemy_speed_mult": 1.3,
+        "enemy_fire_rate_mult": 0.7,
+        "player_damage_mult": 0.8,
+        "score_mult": 1.5
+    }
+}
 
 enemies = []
 enemy_bullets = []
@@ -340,6 +385,8 @@ def _update_enemy_player_collisions():
 
         rr = SHIP_COLLISION_R + (ENEMY_HIT_R * s)
         if (dx*dx + dy*dy + dz*dz) <= (rr * rr):
+            spawn_explosion(ex, ey, ez, 'enemy', s)
+            trigger_damage_flash()
             player_life = max(0, player_life - int(ehp))
             if player_life <= 0:
                 _trigger_game_over()
@@ -403,9 +450,10 @@ def _update_enemies_and_fire():
 
         if dist3_ > ENEMY_STOP_DIST:
             inv = 1.0 / dist3_
-            ex += dx * inv * ENEMY_SPEED
-            ey += dy * inv * ENEMY_SPEED
-            ez += dz * inv * ENEMY_SPEED
+            speed = ENEMY_SPEED * get_difficulty_setting("enemy_speed_mult")
+            ex += dx * inv * speed
+            ey += dy * inv * speed
+            ez += dz * inv * speed
 
             ex = clamp(ex, WORLD_MIN, WORLD_MAX)
             ey = clamp(ey, WORLD_MIN, WORLD_MAX)
@@ -418,7 +466,8 @@ def _update_enemies_and_fire():
 
         if dist3_ <= ENEMY_FIRE_RANGE and e[4] == 0:
             _spawn_enemy_bullet(ex, ey, ez)
-            e[4] = ENEMY_FIRE_COOLDOWN_FRAMES
+            cooldown = int(ENEMY_FIRE_COOLDOWN_FRAMES * get_difficulty_setting("enemy_fire_rate_mult"))
+            e[4] = cooldown
 
 def _update_enemy_bullets_and_hit_player():
     global player_life
@@ -444,7 +493,9 @@ def _update_enemy_bullets_and_hit_player():
         dy = y - player_y
         dz = z - player_z
         if (dx*dx + dy*dy + dz*dz) <= (hit_r * hit_r):
-            player_life = max(0, player_life - ENEMY_BULLET_DAMAGE)
+            trigger_damage_flash()
+            damage = int(ENEMY_BULLET_DAMAGE * get_difficulty_setting("enemy_damage_mult"))
+            player_life = max(0, player_life - damage)
             if player_life <= 0:
                 _trigger_game_over()
             continue
@@ -458,6 +509,17 @@ rocks = []
 black_holes = []
 white_holes = []
 wormholes = []
+stars = []
+engine_particles = []
+bh_pull_particles = []
+wh_push_particles = []
+explosion_particles = []
+muzzle_flashes = []
+bullet_trails = []
+levelup_particles = []
+wormhole_vortex_particles = []
+space_debris = []
+speed_lines = []
 
 
 #Rocks
@@ -511,6 +573,8 @@ def damage_rock(rock_index, dmg=1):
     r[9] -= dmg
 
     if r[9] <= 0:
+        # Spawn explosion at old position before respawning
+        spawn_explosion(r[0], r[1], r[2], 'rock', r[11])
         rocks_destroyed += 1
 
         x = random.uniform(WORLD_MIN + SPAWN_MARGIN_ROCK, WORLD_MAX - SPAWN_MARGIN_ROCK)
@@ -613,6 +677,71 @@ SPAWN_MARGIN_ROCK = 150
 SPAWN_MARGIN_BH = 350
 SPAWN_MARGIN_WH = 350
 SPAWN_MARGIN_WORM = 350
+
+#Stars
+STAR_COUNT = 800
+STAR_SIZE_MIN = 0.5
+STAR_SIZE_MAX = 3.0
+STAR_RANGE = 4000.0
+
+#Engine Particles
+ENGINE_PARTICLE_SPAWN_RATE = 5
+ENGINE_PARTICLE_LIFE = 30
+ENGINE_PARTICLE_SIZE = 6.0
+ENGINE_PARTICLE_SPEED_FACTOR = 0.7
+MIN_SPEED_FOR_PARTICLES = 1.5
+
+#Black Hole Pull Effects
+BH_PULL_PARTICLE_SPAWN_RATE = 8
+BH_PULL_PARTICLE_LIFE = 60
+BH_PULL_EFFECT_RADIUS = 600.0
+BH_PULL_VISUAL_STRENGTH = 4.0
+
+#White Hole Push Effects
+WH_PUSH_PARTICLE_SPAWN_RATE = 8
+WH_PUSH_PARTICLE_LIFE = 60
+WH_PUSH_EFFECT_RADIUS = 600.0
+WH_PUSH_VISUAL_STRENGTH = 4.5
+
+#Explosion Effects
+EXPLOSION_PARTICLE_COUNT = 30
+EXPLOSION_PARTICLE_LIFE = 40
+EXPLOSION_SPEED_MIN = 2.0
+EXPLOSION_SPEED_MAX = 8.0
+EXPLOSION_SIZE = 4.0
+
+#Muzzle Flash
+MUZZLE_FLASH_LIFE = 5
+MUZZLE_FLASH_SIZE = 15.0
+
+#Bullet Trails
+BULLET_TRAIL_SPAWN_RATE = 2
+BULLET_TRAIL_LIFE = 15
+BULLET_TRAIL_SIZE = 2.0
+
+#Level Up Effects
+LEVELUP_PARTICLE_COUNT = 50
+LEVELUP_PARTICLE_LIFE = 60
+LEVELUP_SPEED = 5.0
+
+#Wormhole Vortex
+WORMHOLE_VORTEX_PARTICLES_PER_HOLE = 40
+WORMHOLE_VORTEX_RADIUS = 60.0
+WORMHOLE_VORTEX_SPEED = 0.8
+
+#Speed Lines
+SPEED_LINE_COUNT = 20
+SPEED_LINE_MIN_SPEED = 15.0
+SPEED_LINE_LENGTH = 150.0
+
+#Space Debris
+SPACE_DEBRIS_COUNT = 100
+DEBRIS_DRIFT_SPEED = 0.3
+DEBRIS_SIZE_MIN = 1.0
+DEBRIS_SIZE_MAX = 3.0
+
+#Enemy Warning Indicator
+ENEMY_WARNING_FLASH_FRAMES = 20
 
 def init_black_holes():
     black_holes.clear()
@@ -894,6 +1023,7 @@ def _apply_hole_physics():
     #Player Black hole damage
     dmg = _apply_black_hole_damage_if_needed(player_x, player_y, player_z)
     if dmg > 0:
+        trigger_damage_flash()
         player_life = max(0, player_life - dmg)
         if player_life <= 0:
             _trigger_game_over()
@@ -936,6 +1066,11 @@ def _apply_hole_physics():
     enemies[:] = keep_enemies
 
 
+def trigger_damage_flash():
+    global damage_flash_frames, shield_pulse_frames
+    damage_flash_frames = DAMAGE_FLASH_DURATION
+    shield_pulse_frames = SHIELD_PULSE_DURATION
+
 #Scoreboard
 def _record_score_on_game_over():
     global last_round_score, top5_scores, _scoreboard_locked
@@ -949,7 +1084,792 @@ def _record_score_on_game_over():
     top5_scores[:] = top5_scores[:5]
 
 
+def init_stars():
+    stars.clear()
+    for _ in range(STAR_COUNT):
+        x = random.uniform(-STAR_RANGE, STAR_RANGE)
+        y = random.uniform(-STAR_RANGE, STAR_RANGE)
+        z = random.uniform(-STAR_RANGE / 2, STAR_RANGE / 2)
+        size = random.uniform(STAR_SIZE_MIN, STAR_SIZE_MAX)
+        brightness = random.uniform(0.5, 1.0)
+        stars.append([x, y, z, size, brightness])
+
+def _spawn_engine_particles():
+    if game_over or controls_disabled:
+        return
+    
+    speed = math.sqrt(vel_x**2 + vel_y**2 + vel_z**2)
+    if speed > MIN_SPEED_FOR_PARTICLES:
+        pass
+    else:
+        return
+    
+    rad = math.radians(player_angle)
+    fx, fy = math.cos(rad), math.sin(rad)
+    
+    # Engine positions (relative to ship center, scaled)
+    engine_offsets = [
+        (-40 * SHIP_SCALE, 20.5 * SHIP_SCALE, -8 * SHIP_SCALE),
+        (-40 * SHIP_SCALE, -20.5 * SHIP_SCALE, -8 * SHIP_SCALE)
+    ]
+    
+    for _ in range(ENGINE_PARTICLE_SPAWN_RATE):
+        for offset in engine_offsets:
+            # Rotate offset by player angle
+            ox, oy, oz = offset
+            rot_x = ox * fx - oy * fy
+            rot_y = ox * fy + oy * fx
+            
+            px = player_x + rot_x
+            py = player_y + rot_y
+            pz = player_z + oz
+            
+            # Particle velocity opposite to ship direction
+            vx = -vel_x * ENGINE_PARTICLE_SPEED_FACTOR + random.uniform(-0.5, 0.5)
+            vy = -vel_y * ENGINE_PARTICLE_SPEED_FACTOR + random.uniform(-0.5, 0.5)
+            vz = -vel_z * ENGINE_PARTICLE_SPEED_FACTOR + random.uniform(-0.3, 0.3)
+            
+            # Color varies based on speed (blue to cyan)
+            intensity = min(1.0, speed / MAX_SPEED)
+            r = 0.2 * intensity
+            g = 0.6 + 0.3 * intensity
+            b = 0.9 + 0.1 * intensity
+            
+            engine_particles.append([px, py, pz, vx, vy, vz, ENGINE_PARTICLE_LIFE, r, g, b])
+
+def _update_engine_particles():
+    keep = []
+    for p in engine_particles:
+        x, y, z, vx, vy, vz, life, r, g, b = p
+        x += vx
+        y += vy
+        z += vz
+        life -= 1
+        
+        if life > 0:
+            keep.append([x, y, z, vx, vy, vz, life, r, g, b])
+    
+    engine_particles[:] = keep
+
+def draw_engine_particles():
+    glPointSize(ENGINE_PARTICLE_SIZE)
+    glBegin(GL_POINTS)
+    for p in engine_particles:
+        x, y, z, vx, vy, vz, life, r, g, b = p
+        alpha = life / float(ENGINE_PARTICLE_LIFE)
+        glColor3f(r * alpha, g * alpha, b * alpha)
+        glVertex3f(x, y, z)
+    glEnd()
+
+def _spawn_bh_pull_particles():
+    if game_over:
+        return
+    
+    for bh in black_holes:
+        bx, by, bz = bh["pos"]
+        core_r = bh["core_r"]
+        effect_r = core_r * HOLE_EFFECT_RANGE_MULT
+        
+        # Check if player is in range
+        dx_p = player_x - bx
+        dy_p = player_y - by
+        dz_p = player_z - bz
+        dist_p = math.sqrt(dx_p**2 + dy_p**2 + dz_p**2)
+        
+        if dist_p < BH_PULL_EFFECT_RADIUS:
+            # Spawn particles around the player being pulled
+            for _ in range(BH_PULL_PARTICLE_SPAWN_RATE):
+                angle = random.uniform(0, 2 * math.pi)
+                radius = random.uniform(40, 120)
+                
+                px = player_x + math.cos(angle) * radius
+                py = player_y + math.sin(angle) * radius
+                pz = player_z + random.uniform(-30, 30)
+                
+                bh_pull_particles.append([px, py, pz, bx, by, bz, BH_PULL_PARTICLE_LIFE])
+        
+        # Also check enemies
+        for e in enemies:
+            ex, ey, ez = e[0], e[1], e[2]
+            dx_e = ex - bx
+            dy_e = ey - by
+            dz_e = ez - bz
+            dist_e = math.sqrt(dx_e**2 + dy_e**2 + dz_e**2)
+            
+            if dist_e < BH_PULL_EFFECT_RADIUS and random.random() < 0.3:
+                for _ in range(2):
+                    angle = random.uniform(0, 2 * math.pi)
+                    radius = random.uniform(30, 80)
+                    
+                    px = ex + math.cos(angle) * radius
+                    py = ey + math.sin(angle) * radius
+                    pz = ez + random.uniform(-20, 20)
+                    
+                    bh_pull_particles.append([px, py, pz, bx, by, bz, BH_PULL_PARTICLE_LIFE])
+
+def _update_bh_pull_particles():
+    keep = []
+    for p in bh_pull_particles:
+        x, y, z, bx, by, bz, life = p
+        
+        # Pull towards black hole
+        dx = bx - x
+        dy = by - y
+        dz = bz - z
+        dist = math.sqrt(dx**2 + dy**2 + dz**2)
+        
+        if dist > 1.0:
+            # Accelerate towards black hole
+            pull_speed = BH_PULL_VISUAL_STRENGTH * (1.0 - life / BH_PULL_PARTICLE_LIFE)
+            x += (dx / dist) * pull_speed
+            y += (dy / dist) * pull_speed
+            z += (dz / dist) * pull_speed
+        
+        life -= 1
+        
+        # Keep particle if still alive and not too close to black hole
+        if life > 0 and dist > 5.0:
+            keep.append([x, y, z, bx, by, bz, life])
+    
+    bh_pull_particles[:] = keep
+
+def draw_bh_pull_particles():
+    glPointSize(3.0)
+    glBegin(GL_POINTS)
+    for p in bh_pull_particles:
+        x, y, z, bx, by, bz, life = p
+        alpha = life / float(BH_PULL_PARTICLE_LIFE)
+        
+        # Color gradient: orange to red as it gets pulled in
+        r = 0.8 + 0.2 * (1.0 - alpha)
+        g = 0.3 * alpha
+        b = 0.1 * alpha
+        
+        glColor3f(r, g, b)
+        glVertex3f(x, y, z)
+    glEnd()
+    
+    # Draw lines from particles to black holes for extra effect
+    glLineWidth(1.0)
+    glBegin(GL_LINES)
+    for p in bh_pull_particles:
+        x, y, z, bx, by, bz, life = p
+        if random.random() < 0.15:  # Only draw some lines to avoid clutter
+            alpha = life / float(BH_PULL_PARTICLE_LIFE) * 0.3
+            glColor4f(0.9, 0.4, 0.1, alpha)
+            glVertex3f(x, y, z)
+            glColor4f(0.5, 0.1, 0.05, 0.0)
+            glVertex3f(bx, by, bz)
+    glEnd()
+
+def _spawn_wh_push_particles():
+    if game_over:
+        return
+    
+    for wh in white_holes:
+        wx, wy, wz = wh["pos"]
+        core_r = wh["core_r"]
+        effect_r = core_r * HOLE_EFFECT_RANGE_MULT
+        
+        # Check if player is in range
+        dx_p = player_x - wx
+        dy_p = player_y - wy
+        dz_p = player_z - wz
+        dist_p = math.sqrt(dx_p**2 + dy_p**2 + dz_p**2)
+        
+        if dist_p < WH_PUSH_EFFECT_RADIUS:
+            # Spawn particles at the white hole core, pushing outward
+            for _ in range(WH_PUSH_PARTICLE_SPAWN_RATE):
+                angle = random.uniform(0, 2 * math.pi)
+                elevation = random.uniform(-0.5, 0.5)
+                
+                # Start near white hole center
+                start_r = core_r + random.uniform(5, 20)
+                px = wx + math.cos(angle) * start_r
+                py = wy + math.sin(angle) * start_r
+                pz = wz + elevation * start_r
+                
+                # Direction away from white hole
+                dx = px - wx
+                dy = py - wy
+                dz = pz - wz
+                d = math.sqrt(dx**2 + dy**2 + dz**2)
+                if d > 0.1:
+                    dx /= d
+                    dy /= d
+                    dz /= d
+                
+                wh_push_particles.append([px, py, pz, dx, dy, dz, WH_PUSH_PARTICLE_LIFE])
+        
+        # Also check enemies
+        for e in enemies:
+            ex, ey, ez = e[0], e[1], e[2]
+            dx_e = ex - wx
+            dy_e = ey - wy
+            dz_e = ez - wz
+            dist_e = math.sqrt(dx_e**2 + dy_e**2 + dz_e**2)
+            
+            if dist_e < WH_PUSH_EFFECT_RADIUS and random.random() < 0.3:
+                for _ in range(2):
+                    angle = random.uniform(0, 2 * math.pi)
+                    start_r = core_r + random.uniform(5, 15)
+                    px = wx + math.cos(angle) * start_r
+                    py = wy + math.sin(angle) * start_r
+                    pz = wz + random.uniform(-10, 10)
+                    
+                    dx = px - wx
+                    dy = py - wy
+                    dz = pz - wz
+                    d = math.sqrt(dx**2 + dy**2 + dz**2)
+                    if d > 0.1:
+                        dx /= d
+                        dy /= d
+                        dz /= d
+                    
+                    wh_push_particles.append([px, py, pz, dx, dy, dz, WH_PUSH_PARTICLE_LIFE])
+
+def _update_wh_push_particles():
+    keep = []
+    for p in wh_push_particles:
+        x, y, z, dx, dy, dz, life = p
+        
+        # Push away from white hole
+        push_speed = WH_PUSH_VISUAL_STRENGTH * (1.0 - life / WH_PUSH_PARTICLE_LIFE)
+        x += dx * push_speed
+        y += dy * push_speed
+        z += dz * push_speed
+        
+        life -= 1
+        
+        # Keep particle if still alive
+        if life > 0:
+            keep.append([x, y, z, dx, dy, dz, life])
+    
+    wh_push_particles[:] = keep
+
+def draw_wh_push_particles():
+    glPointSize(3.0)
+    glBegin(GL_POINTS)
+    for p in wh_push_particles:
+        x, y, z, dx, dy, dz, life = p
+        alpha = life / float(WH_PUSH_PARTICLE_LIFE)
+        
+        # Color gradient: bright cyan/white fading to blue
+        r = 0.6 * alpha + 0.3 * (1.0 - alpha)
+        g = 0.8 * alpha + 0.5 * (1.0 - alpha)
+        b = 1.0
+        
+        glColor3f(r, g, b)
+        glVertex3f(x, y, z)
+    glEnd()
+    
+    # Draw radial lines from white holes for extra effect
+    glLineWidth(1.0)
+    glBegin(GL_LINES)
+    for wh in white_holes:
+        wx, wy, wz = wh["pos"]
+        core_r = wh["core_r"]
+        
+        # Draw some radial burst lines
+        if random.random() < 0.5:
+            for _ in range(3):
+                angle = random.uniform(0, 2 * math.pi)
+                elevation = random.uniform(-0.3, 0.3)
+                
+                start_r = core_r * 1.2
+                end_r = core_r * 3.0
+                
+                sx = wx + math.cos(angle) * start_r
+                sy = wy + math.sin(angle) * start_r
+                sz = wz + elevation * start_r
+                
+                ex = wx + math.cos(angle) * end_r
+                ey = wy + math.sin(angle) * end_r
+                ez = wz + elevation * end_r
+                
+                glColor4f(0.7, 0.9, 1.0, 0.3)
+                glVertex3f(sx, sy, sz)
+                glColor4f(0.3, 0.5, 0.8, 0.0)
+                glVertex3f(ex, ey, ez)
+    glEnd()
+
+def spawn_explosion(x, y, z, color_type='enemy', scale=1.0):
+    """Spawn explosion particles at given position
+    color_type: 'enemy' (orange/red), 'rock' (gray/brown), 'player' (blue/white)
+    """
+    particle_count = int(EXPLOSION_PARTICLE_COUNT * scale)
+    
+    for _ in range(particle_count):
+        # Random direction
+        angle = random.uniform(0, 2 * math.pi)
+        elevation = random.uniform(-math.pi/3, math.pi/3)
+        
+        speed = random.uniform(EXPLOSION_SPEED_MIN, EXPLOSION_SPEED_MAX) * scale
+        
+        vx = math.cos(angle) * math.cos(elevation) * speed
+        vy = math.sin(angle) * math.cos(elevation) * speed
+        vz = math.sin(elevation) * speed
+        
+        # Color based on type
+        if color_type == 'enemy':
+            r = random.uniform(0.8, 1.0)
+            g = random.uniform(0.3, 0.6)
+            b = random.uniform(0.0, 0.2)
+        elif color_type == 'rock':
+            gray = random.uniform(0.4, 0.7)
+            r = gray + random.uniform(0.0, 0.2)
+            g = gray
+            b = gray - random.uniform(0.0, 0.1)
+        else:  # player
+            r = random.uniform(0.5, 0.8)
+            g = random.uniform(0.7, 0.9)
+            b = random.uniform(0.9, 1.0)
+        
+        life = int(EXPLOSION_PARTICLE_LIFE * random.uniform(0.7, 1.3))
+        size = random.uniform(0.7, 1.3) * scale
+        
+        explosion_particles.append([x, y, z, vx, vy, vz, life, r, g, b, size])
+
+def _update_explosion_particles():
+    keep = []
+    for p in explosion_particles:
+        x, y, z, vx, vy, vz, life, r, g, b, size = p
+        
+        # Move particle
+        x += vx
+        y += vy
+        z += vz
+        
+        # Apply drag
+        vx *= 0.96
+        vy *= 0.96
+        vz *= 0.96
+        
+        life -= 1
+        
+        if life > 0:
+            keep.append([x, y, z, vx, vy, vz, life, r, g, b, size])
+    
+    explosion_particles[:] = keep
+
+def draw_explosion_particles():
+    for p in explosion_particles:
+        x, y, z, vx, vy, vz, life, r, g, b, size = p
+        alpha = life / float(EXPLOSION_PARTICLE_LIFE)
+        
+        # Fade out and change color as particles age
+        glPointSize(EXPLOSION_SIZE * size * alpha)
+        glBegin(GL_POINTS)
+        glColor3f(r * alpha, g * alpha, b * alpha)
+        glVertex3f(x, y, z)
+        glEnd()
+
+def _update_muzzle_flashes():
+    keep = []
+    for mf in muzzle_flashes:
+        x, y, z, life = mf
+        life -= 1
+        if life > 0:
+            keep.append([x, y, z, life])
+    muzzle_flashes[:] = keep
+
+def draw_muzzle_flashes():
+    for mf in muzzle_flashes:
+        x, y, z, life = mf
+        alpha = life / float(MUZZLE_FLASH_LIFE)
+        size = MUZZLE_FLASH_SIZE * (1.0 + (1.0 - alpha) * 0.5)
+        
+        glPointSize(size)
+        glBegin(GL_POINTS)
+        glColor3f(1.0 * alpha, 0.9 * alpha, 0.5 * alpha)
+        glVertex3f(x, y, z)
+        glEnd()
+
+def _spawn_bullet_trails():
+    # Spawn trails for player bullets
+    for b in player_bullets:
+        if random.random() < 0.5:
+            x, y, z = b[0], b[1], b[2]
+            bullet_trails.append([x, y, z, BULLET_TRAIL_LIFE, 0.2, 0.9, 1.0])
+    
+    # Spawn trails for enemy bullets
+    for b in enemy_bullets:
+        if random.random() < 0.5:
+            x, y, z = b[0], b[1], b[2]
+            bullet_trails.append([x, y, z, BULLET_TRAIL_LIFE, 1.0, 0.3, 0.2])
+
+def _update_bullet_trails():
+    keep = []
+    for bt in bullet_trails:
+        x, y, z, life, r, g, b = bt
+        life -= 1
+        if life > 0:
+            keep.append([x, y, z, life, r, g, b])
+    bullet_trails[:] = keep
+
+def draw_bullet_trails():
+    glPointSize(BULLET_TRAIL_SIZE)
+    glBegin(GL_POINTS)
+    for bt in bullet_trails:
+        x, y, z, life, r, g, b = bt
+        alpha = life / float(BULLET_TRAIL_LIFE) * 0.6
+        glColor3f(r * alpha, g * alpha, b * alpha)
+        glVertex3f(x, y, z)
+    glEnd()
+
+def spawn_levelup_effect(x, y, z, effect_type='gun'):
+    """Spawn level up particles
+    effect_type: 'gun' (cyan) or 'ship' (gold)
+    """
+    for _ in range(LEVELUP_PARTICLE_COUNT):
+        angle = random.uniform(0, 2 * math.pi)
+        elevation = random.uniform(-math.pi/2, math.pi/2)
+        speed = random.uniform(LEVELUP_SPEED * 0.5, LEVELUP_SPEED)
+        
+        vx = math.cos(angle) * math.cos(elevation) * speed
+        vy = math.sin(angle) * math.cos(elevation) * speed
+        vz = math.sin(elevation) * speed
+        
+        if effect_type == 'gun':
+            r, g, b = 0.3, 0.9, 1.0
+        else:  # ship
+            r, g, b = 1.0, 0.8, 0.2
+        
+        life = int(LEVELUP_PARTICLE_LIFE * random.uniform(0.8, 1.2))
+        levelup_particles.append([x, y, z, vx, vy, vz, life, r, g, b])
+
+def _update_levelup_particles():
+    keep = []
+    for p in levelup_particles:
+        x, y, z, vx, vy, vz, life, r, g, b = p
+        x += vx
+        y += vy
+        z += vz
+        vx *= 0.98
+        vy *= 0.98
+        vz *= 0.98
+        life -= 1
+        if life > 0:
+            keep.append([x, y, z, vx, vy, vz, life, r, g, b])
+    levelup_particles[:] = keep
+
+def draw_levelup_particles():
+    glPointSize(5.0)
+    glBegin(GL_POINTS)
+    for p in levelup_particles:
+        x, y, z, vx, vy, vz, life, r, g, b = p
+        alpha = life / float(LEVELUP_PARTICLE_LIFE)
+        glColor3f(r * alpha, g * alpha, b * alpha)
+        glVertex3f(x, y, z)
+    glEnd()
+
+def draw_shield():
+    if shield_pulse_frames <= 0:
+        return
+    
+    glPushMatrix()
+    glTranslatef(player_x, player_y, player_z)
+    
+    alpha = shield_pulse_frames / float(SHIELD_PULSE_DURATION)
+    pulse = math.sin(shield_pulse_frames * 0.3) * 0.3 + 0.7
+    radius = SHIP_COLLISION_R * 1.5 * pulse
+    
+    # Draw shield sphere with transparency
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glColor4f(0.2, 0.6, 1.0, alpha * 0.3)
+    
+    quad = gluNewQuadric()
+    gluSphere(quad, radius, 20, 20)
+    
+    glDisable(GL_BLEND)
+    glPopMatrix()
+
+def draw_damage_flash():
+    if damage_flash_frames <= 0:
+        return
+    
+    _begin_2d_overlay()
+    
+    alpha = damage_flash_frames / float(DAMAGE_FLASH_DURATION) * 0.4
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glColor4f(1.0, 0.2, 0.2, alpha)
+    
+    glBegin(GL_QUADS)
+    glVertex2f(0, 0)
+    glVertex2f(WIN_W, 0)
+    glVertex2f(WIN_W, WIN_H)
+    glVertex2f(0, WIN_H)
+    glEnd()
+    
+    glDisable(GL_BLEND)
+    _end_2d_overlay()
+
+def init_space_debris():
+    space_debris.clear()
+    for _ in range(SPACE_DEBRIS_COUNT):
+        x = random.uniform(-STAR_RANGE, STAR_RANGE)
+        y = random.uniform(-STAR_RANGE, STAR_RANGE)
+        z = random.uniform(-STAR_RANGE / 2, STAR_RANGE / 2)
+        vx = random.uniform(-DEBRIS_DRIFT_SPEED, DEBRIS_DRIFT_SPEED)
+        vy = random.uniform(-DEBRIS_DRIFT_SPEED, DEBRIS_DRIFT_SPEED)
+        vz = random.uniform(-DEBRIS_DRIFT_SPEED * 0.5, DEBRIS_DRIFT_SPEED * 0.5)
+        size = random.uniform(DEBRIS_SIZE_MIN, DEBRIS_SIZE_MAX)
+        brightness = random.uniform(0.3, 0.6)
+        space_debris.append([x, y, z, vx, vy, vz, size, brightness])
+
+def _update_space_debris():
+    for d in space_debris:
+        d[0] += d[3]  # x += vx
+        d[1] += d[4]  # y += vy
+        d[2] += d[5]  # z += vz
+        
+        # Wrap around
+        if d[0] < -STAR_RANGE: d[0] = STAR_RANGE
+        if d[0] > STAR_RANGE: d[0] = -STAR_RANGE
+        if d[1] < -STAR_RANGE: d[1] = STAR_RANGE
+        if d[1] > STAR_RANGE: d[1] = -STAR_RANGE
+        if d[2] < -STAR_RANGE/2: d[2] = STAR_RANGE/2
+        if d[2] > STAR_RANGE/2: d[2] = -STAR_RANGE/2
+
+def draw_space_debris():
+    glPointSize(2.0)
+    glBegin(GL_POINTS)
+    for d in space_debris:
+        x, y, z, vx, vy, vz, size, brightness = d
+        glColor3f(brightness * 0.7, brightness * 0.6, brightness * 0.5)
+        glVertex3f(x, y, z)
+    glEnd()
+
+def _spawn_wormhole_vortex_particles():
+    for w in wormholes:
+        wx, wy, wz = w["pos"]
+        core_r = w["core_r"]
+        
+        # Spawn spiraling particles
+        for _ in range(2):  # Spawn a few per frame
+            angle = random.uniform(0, 2 * math.pi)
+            radius = random.uniform(core_r * 2, core_r * 4)
+            height = random.uniform(-core_r, core_r)
+            
+            x = wx + math.cos(angle) * radius
+            y = wy + math.sin(angle) * radius
+            z = wz + height
+            
+            wormhole_vortex_particles.append([x, y, z, wx, wy, wz, angle, 60])
+
+def _update_wormhole_vortex_particles():
+    keep = []
+    for p in wormhole_vortex_particles:
+        x, y, z, wx, wy, wz, angle, life = p
+        
+        # Spiral inward
+        dx = x - wx
+        dy = y - wy
+        radius = math.sqrt(dx*dx + dy*dy)
+        
+        if radius > 5.0:
+            angle += WORMHOLE_VORTEX_SPEED
+            radius *= 0.95  # Move inward
+            
+            x = wx + math.cos(angle) * radius
+            y = wy + math.sin(angle) * radius
+            z += (wz - z) * 0.05  # Move toward center z
+            
+            life -= 1
+            if life > 0:
+                keep.append([x, y, z, wx, wy, wz, angle, life])
+    
+    wormhole_vortex_particles[:] = keep
+
+def draw_wormhole_vortex_particles():
+    glPointSize(3.0)
+    glBegin(GL_POINTS)
+    for p in wormhole_vortex_particles:
+        x, y, z, wx, wy, wz, angle, life = p
+        alpha = life / 60.0
+        
+        # Purple/magenta color
+        glColor3f(0.7 * alpha, 0.3 * alpha, 0.9 * alpha)
+        glVertex3f(x, y, z)
+    glEnd()
+
+def _update_speed_lines():
+    speed = math.sqrt(vel_x**2 + vel_y**2 + vel_z**2)
+    
+    if speed < SPEED_LINE_MIN_SPEED:
+        speed_lines.clear()
+        return
+    
+    # Generate speed lines if moving fast
+    if len(speed_lines) < SPEED_LINE_COUNT:
+        for _ in range(SPEED_LINE_COUNT - len(speed_lines)):
+            angle = random.uniform(0, 2 * math.pi)
+            dist = random.uniform(100, 500)
+            offset_x = math.cos(angle) * dist
+            offset_y = math.sin(angle) * dist
+            offset_z = random.uniform(-200, 200)
+            
+            speed_lines.append([offset_x, offset_y, offset_z])
+
+def draw_speed_lines():
+    if len(speed_lines) == 0:
+        return
+    
+    speed = math.sqrt(vel_x**2 + vel_y**2 + vel_z**2)
+    if speed < SPEED_LINE_MIN_SPEED:
+        return
+    
+    intensity = min(1.0, (speed - SPEED_LINE_MIN_SPEED) / MAX_SPEED)
+    
+    glLineWidth(2.0)
+    glBegin(GL_LINES)
+    for sl in speed_lines:
+        offset_x, offset_y, offset_z = sl
+        
+        # Line starts ahead of player, goes backward
+        start_x = player_x + offset_x - vel_x * 5
+        start_y = player_y + offset_y - vel_y * 5
+        start_z = player_z + offset_z - vel_z * 5
+        
+        end_x = start_x - vel_x * SPEED_LINE_LENGTH / speed
+        end_y = start_y - vel_y * SPEED_LINE_LENGTH / speed
+        end_z = start_z - vel_z * SPEED_LINE_LENGTH / speed
+        
+        glColor4f(0.8 * intensity, 0.9 * intensity, 1.0 * intensity, intensity * 0.6)
+        glVertex3f(start_x, start_y, start_z)
+        glColor4f(0.3, 0.4, 0.5, 0.0)
+        glVertex3f(end_x, end_y, end_z)
+    glEnd()
+
+def draw_health_bar():
+    _begin_2d_overlay()
+    
+    # Health bar position and size
+    bar_x = 12
+    bar_y = WIN_H - 50
+    bar_w = 250
+    bar_h = 20
+    
+    # Background
+    glColor3f(0.2, 0.2, 0.2)
+    glBegin(GL_QUADS)
+    glVertex2f(bar_x, bar_y)
+    glVertex2f(bar_x + bar_w, bar_y)
+    glVertex2f(bar_x + bar_w, bar_y + bar_h)
+    glVertex2f(bar_x, bar_y + bar_h)
+    glEnd()
+    
+    # Health fill
+    health_percent = max(0.0, min(1.0, player_life / float(player_max_hp)))
+    fill_w = bar_w * health_percent
+    
+    # Color gradient based on health
+    if health_percent > 0.6:
+        r, g, b = 0.2, 0.9, 0.2  # Green
+    elif health_percent > 0.3:
+        r, g, b = 0.9, 0.9, 0.2  # Yellow
+    else:
+        r, g, b = 0.9, 0.2, 0.2  # Red
+    
+    glColor3f(r, g, b)
+    glBegin(GL_QUADS)
+    glVertex2f(bar_x, bar_y)
+    glVertex2f(bar_x + fill_w, bar_y)
+    glVertex2f(bar_x + fill_w, bar_y + bar_h)
+    glVertex2f(bar_x, bar_y + bar_h)
+    glEnd()
+    
+    # Border
+    glColor3f(0.8, 0.8, 0.8)
+    glLineWidth(2.0)
+    glBegin(GL_LINE_LOOP)
+    glVertex2f(bar_x, bar_y)
+    glVertex2f(bar_x + bar_w, bar_y)
+    glVertex2f(bar_x + bar_w, bar_y + bar_h)
+    glVertex2f(bar_x, bar_y + bar_h)
+    glEnd()
+    
+    # Text
+    glColor3f(1.0, 1.0, 1.0)
+    draw_text(bar_x + 5, bar_y + 5, f"{player_life} / {player_max_hp}")
+    
+    _end_2d_overlay()
+
+def draw_enemy_warning_indicators():
+    for e in enemies:
+        ex, ey, ez, ang, cd, s, ehp = e
+        
+        # Show warning when about to fire (last 20 frames of cooldown)
+        if cd <= ENEMY_WARNING_FLASH_FRAMES and cd > 0:
+            flash = (cd % 6) < 3  # Blink effect
+            if flash:
+                glPushMatrix()
+                glTranslatef(ex, ey, ez)
+                
+                intensity = 1.0 - (cd / float(ENEMY_WARNING_FLASH_FRAMES))
+                glColor3f(1.0 * intensity, 0.3 * intensity, 0.0)
+                
+                # Draw glowing ring
+                glBegin(GL_LINE_LOOP)
+                for i in range(16):
+                    angle = (i / 16.0) * 2 * math.pi
+                    radius = (ENEMY_HIT_R * s) * (1.2 + intensity * 0.3)
+                    x = math.cos(angle) * radius
+                    y = math.sin(angle) * radius
+                    glVertex3f(x, y, 0)
+                glEnd()
+                
+                glPopMatrix()
+
+def draw_gravitational_lensing():
+    # Simple visual distortion effect around black holes
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    
+    for bh in black_holes:
+        bx, by, bz = bh["pos"]
+        core_r = bh["core_r"]
+        
+        # Check if player is close enough to see lensing
+        dx = player_x - bx
+        dy = player_y - by
+        dz = player_z - bz
+        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+        
+        if dist < 800.0:
+            glPushMatrix()
+            glTranslatef(bx, by, bz)
+            
+            # Draw concentric distortion rings
+            for ring in range(3):
+                radius = core_r * (3.0 + ring * 1.5)
+                alpha = 0.15 - ring * 0.04
+                
+                glColor4f(0.1, 0.05, 0.2, alpha)
+                glBegin(GL_LINE_LOOP)
+                for i in range(32):
+                    angle = (i / 32.0) * 2 * math.pi
+                    x = math.cos(angle) * radius
+                    y = math.sin(angle) * radius
+                    glVertex3f(x, y, 0)
+                glEnd()
+            
+            glPopMatrix()
+    
+    glDisable(GL_BLEND)
+
 # Draw environment
+def draw_stars():
+    glPointSize(2.0)
+    glBegin(GL_POINTS)
+    for s in stars:
+        x, y, z, size, brightness = s
+        glColor3f(brightness, brightness, brightness)
+        glVertex3f(x, y, z)
+    glEnd()
+
 def draw_rocks():
     quad = gluNewQuadric()
     for r in rocks:
@@ -1425,9 +2345,12 @@ WIN_W, WIN_H = 1000, 800
 
 def set_ship_level(new_level):
     global ship_level, player_max_hp, player_life
+    old_level = ship_level
     ship_level = clamp(int(new_level), 1, 5)
     player_max_hp = SHIP_STATS_BY_LEVEL[ship_level]["hp"]
     player_life = player_max_hp
+    if new_level != old_level:
+        spawn_levelup_effect(player_x, player_y, player_z, 'ship')
 
 def _ship_speed_mult():
     return SHIP_STATS_BY_LEVEL[clamp(int(ship_level), 1, 5)]["speed_mult"]
@@ -1467,13 +2390,12 @@ def draw_hud():
     glColor3f(1.0, 1.0, 1.0)
 
     left_x = 12
-    top_y = WIN_H - 28
+    top_y = WIN_H - 85  # Moved down to make room for health bar
     line = 22
 
-    draw_text(left_x, top_y,           f"Player Life: {player_life}")
-    draw_text(left_x, top_y - line,    f"Player Score: {player_score}")
-    draw_text(left_x, top_y - 2*line,  f"Ship Level: {ship_level}")
-    draw_text(left_x, top_y - 3*line,  f"Gun Level: {gun_level}")
+    draw_text(left_x, top_y,           f"Player Score: {player_score}")
+    draw_text(left_x, top_y - line,    f"Ship Level: {ship_level}")
+    draw_text(left_x, top_y - 2*line,  f"Gun Level: {gun_level}")
 
     controls = [
         "How to Navigate:",
@@ -1495,36 +2417,388 @@ def draw_hud():
     _end_2d_overlay()
 
     if game_over:
-        _begin_2d_overlay()
-        glColor3f(0.2, 0.6, 1.0)
+        draw_game_over_screen()
 
-        mid_x = WIN_W * 0.5
-        start_y = WIN_H * 0.5 + 120
-        line2 = 26
+def draw_game_over_screen():
+    _begin_2d_overlay()
+    
+    # Dark overlay
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glColor4f(0.0, 0.0, 0.0, 0.85)
+    glBegin(GL_QUADS)
+    glVertex2f(0, 0)
+    glVertex2f(WIN_W, 0)
+    glVertex2f(WIN_W, WIN_H)
+    glVertex2f(0, WIN_H)
+    glEnd()
+    glDisable(GL_BLEND)
+    
+    # Title - Top Center
+    glColor3f(1.0, 0.2, 0.2)
+    title = "GAME OVER"
+    title_w = text_width(title, GLUT_BITMAP_HELVETICA_18)
+    draw_text(WIN_W/2 - title_w/2, WIN_H - 50, title, GLUT_BITMAP_HELVETICA_18)
+    
+    # Restart prompt - Below title, centered
+    glColor3f(0.5, 1.0, 0.5)
+    restart_text = "Press R to Restart"
+    restart_w = text_width(restart_text)
+    draw_text(WIN_W/2 - restart_w/2, WIN_H - 80, restart_text)
+    
+    # Stats box - Center of screen
+    box_w = 400
+    box_h = 280
+    box_x = WIN_W / 2 - box_w / 2
+    box_y = WIN_H / 2 - box_h / 2
+    
+    glColor3f(0.2, 0.2, 0.3)
+    glBegin(GL_QUADS)
+    glVertex2f(box_x, box_y)
+    glVertex2f(box_x + box_w, box_y)
+    glVertex2f(box_x + box_w, box_y + box_h)
+    glVertex2f(box_x, box_y + box_h)
+    glEnd()
+    
+    glColor3f(0.5, 0.5, 0.6)
+    glLineWidth(3.0)
+    glBegin(GL_LINE_LOOP)
+    glVertex2f(box_x, box_y)
+    glVertex2f(box_x + box_w, box_y)
+    glVertex2f(box_x + box_w, box_y + box_h)
+    glVertex2f(box_x, box_y + box_h)
+    glEnd()
+    
+    # Stats
+    glColor3f(1.0, 1.0, 1.0)
+    line_h = 25
+    start_y = box_y + box_h - 30
+    
+    draw_text(box_x + 20, start_y, f"Final Score: {last_round_score}")
+    draw_text(box_x + 20, start_y - line_h, f"Enemies Killed: {enemy_kills_total}")
+    draw_text(box_x + 20, start_y - line_h*2, f"Rocks Destroyed: {rocks_destroyed}")
+    draw_text(box_x + 20, start_y - line_h*3, f"Final Ship Level: {ship_level}")
+    draw_text(box_x + 20, start_y - line_h*4, f"Final Gun Level: {gun_level}")
+    draw_text(box_x + 20, start_y - line_h*5, f"Difficulty: {difficulty}")
+    
+    # Leaderboard
+    glColor3f(1.0, 0.8, 0.2)
+    draw_text(box_x + 20, start_y - line_h*7, "TOP 5 SCORES:")
+    
+    glColor3f(0.8, 0.8, 1.0)
+    for i, score in enumerate(top5_scores):
+        rank_text = f"{i+1}. {score}"
+        draw_text(box_x + 40, start_y - line_h*(8+i), rank_text)
+    
+    _end_2d_overlay()
 
-        title = "GAME OVER"
-        w = text_width(title, GLUT_BITMAP_HELVETICA_18)
-        draw_text(int(mid_x - w * 0.5), int(start_y), title, GLUT_BITMAP_HELVETICA_18)
+def draw_minimap():
+    if game_over:
+        return
+    
+    _begin_2d_overlay()
+    
+    # Minimap settings
+    map_size = 180
+    map_x = WIN_W - map_size - 15
+    map_y = 15
+    
+    # Background
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glColor4f(0.0, 0.0, 0.0, 0.6)
+    glBegin(GL_QUADS)
+    glVertex2f(map_x, map_y)
+    glVertex2f(map_x + map_size, map_y)
+    glVertex2f(map_x + map_size, map_y + map_size)
+    glVertex2f(map_x, map_y + map_size)
+    glEnd()
+    
+    # Border
+    glColor4f(0.3, 0.6, 0.8, 0.8)
+    glLineWidth(2.0)
+    glBegin(GL_LINE_LOOP)
+    glVertex2f(map_x, map_y)
+    glVertex2f(map_x + map_size, map_y)
+    glVertex2f(map_x + map_size, map_y + map_size)
+    glVertex2f(map_x, map_y + map_size)
+    glEnd()
+    
+    # Scale world to minimap
+    world_size = WORLD_MAX - WORLD_MIN
+    scale = map_size / world_size
+    
+    def world_to_map(wx, wy):
+        mx = map_x + (wx - WORLD_MIN) * scale
+        my = map_y + (wy - WORLD_MIN) * scale
+        return mx, my
+    
+    # Draw black holes
+    glPointSize(6.0)
+    glBegin(GL_POINTS)
+    for bh in black_holes:
+        bx, by, _ = bh["pos"]
+        mx, my = world_to_map(bx, by)
+        glColor4f(0.5, 0.0, 0.5, 0.9)
+        glVertex2f(mx, my)
+    glEnd()
+    
+    # Draw white holes
+    glPointSize(6.0)
+    glBegin(GL_POINTS)
+    for wh in white_holes:
+        wx, wy, _ = wh["pos"]
+        mx, my = world_to_map(wx, wy)
+        glColor4f(0.9, 0.9, 1.0, 0.9)
+        glVertex2f(mx, my)
+    glEnd()
+    
+    # Draw enemies
+    glPointSize(4.0)
+    glBegin(GL_POINTS)
+    for e in enemies:
+        ex, ey = e[0], e[1]
+        mx, my = world_to_map(ex, ey)
+        glColor4f(1.0, 0.3, 0.3, 0.9)
+        glVertex2f(mx, my)
+    glEnd()
+    
+    # Draw player
+    px, py = world_to_map(player_x, player_y)
+    glPointSize(8.0)
+    glBegin(GL_POINTS)
+    glColor4f(0.2, 1.0, 0.2, 1.0)
+    glVertex2f(px, py)
+    glEnd()
+    
+    # Draw player direction
+    rad = math.radians(player_angle)
+    dir_len = 15
+    glLineWidth(2.0)
+    glBegin(GL_LINES)
+    glColor4f(0.2, 1.0, 0.2, 1.0)
+    glVertex2f(px, py)
+    glVertex2f(px + math.cos(rad) * dir_len, py + math.sin(rad) * dir_len)
+    glEnd()
+    
+    glDisable(GL_BLEND)
+    _end_2d_overlay()
 
-        s1 = f"Last Round Score: {last_round_score}"
-        w = text_width(s1, GLUT_BITMAP_HELVETICA_18)
-        draw_text(int(mid_x - w * 0.5), int(start_y - line2), s1, GLUT_BITMAP_HELVETICA_18)
+def draw_offscreen_indicators():
+    if game_over or game_paused:
+        return
+    
+    _begin_2d_overlay()
+    
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    
+    margin = 30
+    
+    for e in enemies:
+        ex, ey, ez = e[0], e[1], e[2]
+        
+        # Project to screen - simplified check
+        dx = ex - player_x
+        dy = ey - player_y
+        
+        # Check if roughly off-screen (simplified)
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist < 500:  # Too close, skip
+            continue
+        
+        angle = math.atan2(dy, dx)
+        
+        # Calculate indicator position
+        screen_angle = angle - math.radians(player_angle)
+        
+        indicator_dist = 150
+        ind_x = WIN_W/2 + math.cos(screen_angle) * indicator_dist
+        ind_y = WIN_H/2 + math.sin(screen_angle) * indicator_dist
+        
+        # Clamp to screen edges
+        ind_x = clamp(ind_x, margin, WIN_W - margin)
+        ind_y = clamp(ind_y, margin, WIN_H - margin)
+        
+        # Draw arrow
+        arrow_size = 8
+        glColor4f(1.0, 0.3, 0.3, 0.7)
+        glBegin(GL_TRIANGLES)
+        # Point toward enemy
+        tip_x = ind_x + math.cos(angle - math.radians(player_angle)) * arrow_size
+        tip_y = ind_y + math.sin(angle - math.radians(player_angle)) * arrow_size
+        
+        base_angle1 = angle - math.radians(player_angle) + 2.5
+        base_angle2 = angle - math.radians(player_angle) - 2.5
+        
+        glVertex2f(tip_x, tip_y)
+        glVertex2f(ind_x + math.cos(base_angle1) * arrow_size * 0.5,
+                   ind_y + math.sin(base_angle1) * arrow_size * 0.5)
+        glVertex2f(ind_x + math.cos(base_angle2) * arrow_size * 0.5,
+                   ind_y + math.sin(base_angle2) * arrow_size * 0.5)
+        glEnd()
+    
+    glDisable(GL_BLEND)
+    _end_2d_overlay()
 
-        s2 = "Top 5 Scores"
-        w = text_width(s2, GLUT_BITMAP_HELVETICA_18)
-        draw_text(int(mid_x - w * 0.5), int(start_y - 2*line2), s2, GLUT_BITMAP_HELVETICA_18)
+def draw_pause_menu():
+    if not game_paused:
+        return
+    
+    _begin_2d_overlay()
+    
+    # Dark overlay
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glColor4f(0.0, 0.0, 0.0, 0.7)
+    glBegin(GL_QUADS)
+    glVertex2f(0, 0)
+    glVertex2f(WIN_W, 0)
+    glVertex2f(WIN_W, WIN_H)
+    glVertex2f(0, WIN_H)
+    glEnd()
+    
+    # Title
+    glColor3f(1.0, 1.0, 1.0)
+    title = "PAUSED"
+    title_w = text_width(title, GLUT_BITMAP_HELVETICA_18) * 1.5
+    draw_text(WIN_W/2 - title_w/3, WIN_H - 100, title, GLUT_BITMAP_HELVETICA_18)
+    
+    # Menu box
+    box_w = 400
+    box_h = 300
+    box_x = WIN_W/2 - box_w/2
+    box_y = WIN_H/2 - box_h/2
+    
+    glColor4f(0.15, 0.15, 0.2, 0.95)
+    glBegin(GL_QUADS)
+    glVertex2f(box_x, box_y)
+    glVertex2f(box_x + box_w, box_y)
+    glVertex2f(box_x + box_w, box_y + box_h)
+    glVertex2f(box_x, box_y + box_h)
+    glEnd()
+    
+    glColor3f(0.4, 0.6, 0.8)
+    glLineWidth(3.0)
+    glBegin(GL_LINE_LOOP)
+    glVertex2f(box_x, box_y)
+    glVertex2f(box_x + box_w, box_y)
+    glVertex2f(box_x + box_w, box_y + box_h)
+    glVertex2f(box_x, box_y + box_h)
+    glEnd()
+    
+    # Menu items
+    glColor3f(1.0, 1.0, 1.0)
+    line_h = 35
+    start_y = box_y + box_h - 50
+    
+    draw_text(box_x + 30, start_y, "Press P to Resume")
+    draw_text(box_x + 30, start_y - line_h, "Press R to Restart")
+    draw_text(box_x + 30, start_y - line_h*2, "")
+    draw_text(box_x + 30, start_y - line_h*3, "Difficulty Settings:")
+    
+    # Difficulty options
+    difficulties = ["Easy", "Normal", "Hard"]
+    for i, diff in enumerate(difficulties):
+        y_pos = start_y - line_h*(4+i)
+        if diff == difficulty:
+            glColor3f(0.3, 1.0, 0.3)
+            draw_text(box_x + 50, y_pos, f"[{diff}] <-- CURRENT")
+        else:
+            glColor3f(0.7, 0.7, 0.7)
+            draw_text(box_x + 50, y_pos, f" {diff}")
+    
+    glColor3f(0.8, 0.8, 0.5)
+    draw_text(box_x + 30, start_y - line_h*8, "Press 1=Easy, 2=Normal, 3=Hard")
+    
+    glDisable(GL_BLEND)
+    _end_2d_overlay()
 
-        for i in range(5):
-            val = top5_scores[i] if i < len(top5_scores) else 0
-            row = f"{i+1}. {val}"
-            w = text_width(row, GLUT_BITMAP_HELVETICA_18)
-            draw_text(int(mid_x - w * 0.5), int(start_y - (3+i)*line2), row, GLUT_BITMAP_HELVETICA_18)
-
-        hint = "Press R to Restart"
-        w = text_width(hint, GLUT_BITMAP_HELVETICA_18)
-        draw_text(int(mid_x - w * 0.5), int(start_y - 9*line2), hint, GLUT_BITMAP_HELVETICA_18)
-
-        _end_2d_overlay()
+def draw_start_screen():
+    _begin_2d_overlay()
+    
+    # Dark overlay
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glColor4f(0.0, 0.0, 0.1, 0.95)
+    glBegin(GL_QUADS)
+    glVertex2f(0, 0)
+    glVertex2f(WIN_W, 0)
+    glVertex2f(WIN_W, WIN_H)
+    glVertex2f(0, WIN_H)
+    glEnd()
+    
+    # Title
+    glColor3f(0.3, 0.9, 1.0)
+    title = "SINGULARITY WARS"
+    title_w = text_width(title, GLUT_BITMAP_HELVETICA_18) * 1.2
+    draw_text(WIN_W/2 - title_w/2.5, WIN_H - 80, title, GLUT_BITMAP_HELVETICA_18)
+    
+    # Menu box
+    box_w = 450
+    box_h = 380
+    box_x = WIN_W/2 - box_w/2
+    box_y = WIN_H/2 - box_h/2
+    
+    glColor4f(0.1, 0.15, 0.25, 0.9)
+    glBegin(GL_QUADS)
+    glVertex2f(box_x, box_y)
+    glVertex2f(box_x + box_w, box_y)
+    glVertex2f(box_x + box_w, box_y + box_h)
+    glVertex2f(box_x, box_y + box_h)
+    glEnd()
+    
+    glColor3f(0.3, 0.6, 0.9)
+    glLineWidth(3.0)
+    glBegin(GL_LINE_LOOP)
+    glVertex2f(box_x, box_y)
+    glVertex2f(box_x + box_w, box_y)
+    glVertex2f(box_x + box_w, box_y + box_h)
+    glVertex2f(box_x, box_y + box_h)
+    glEnd()
+    
+    # Instructions
+    glColor3f(1.0, 1.0, 1.0)
+    line_h = 35
+    start_y = box_y + box_h - 40
+    
+    draw_text(box_x + 30, start_y, "SELECT DIFFICULTY:")
+    
+    # Difficulty options
+    difficulties = [
+        ("Easy", "60% Enemy Damage, 70% Enemy Speed"),
+        ("Normal", "Balanced Gameplay"),
+        ("Hard", "150% Enemy Damage, 130% Enemy Speed")
+    ]
+    
+    for i, (diff, desc) in enumerate(difficulties):
+        y_pos = start_y - line_h*(1.5+i*2)
+        
+        if diff == difficulty:
+            glColor3f(0.3, 1.0, 0.3)
+            draw_text(box_x + 40, y_pos, f"[{diff}]")
+            glColor3f(0.7, 0.9, 0.7)
+            draw_text(box_x + 60, y_pos - 18, desc)
+        else:
+            glColor3f(0.7, 0.7, 0.7)
+            draw_text(box_x + 40, y_pos, f" {diff}")
+            glColor3f(0.5, 0.5, 0.5)
+            draw_text(box_x + 60, y_pos - 18, desc)
+    
+    # Controls inside box
+    glColor3f(0.9, 0.9, 0.5)
+    control_text = "Press 1 = Easy  |  2 = Normal  |  3 = Hard"
+    control_w = text_width(control_text)
+    draw_text(box_x + (box_w - control_w)/2, box_y + 30, control_text)
+    
+    # Start prompt below box
+    glColor3f(0.5, 1.0, 0.5)
+    start_text = "Press SPACE or ENTER to Start Game"
+    start_w = text_width(start_text)
+    draw_text(WIN_W/2 - start_w/2, box_y - 40, start_text)
+    
+    glDisable(GL_BLEND)
+    _end_2d_overlay()
 
 
 #Display
@@ -1533,22 +2807,46 @@ def showScreen():
     glLoadIdentity()
     glViewport(0, 0, WIN_W, WIN_H)
 
+    if not game_started:
+        draw_start_screen()
+        glutSwapBuffers()
+        return
+
     setupCamera()
 
+    draw_stars()
+    draw_space_debris()
+    draw_gravitational_lensing()
     draw_black_holes()
+    draw_bh_pull_particles()
     draw_white_holes()
+    draw_wh_push_particles()
     draw_wormholes()
+    draw_wormhole_vortex_particles()
     draw_rocks()
     draw_enemies()
+    draw_enemy_warning_indicators()
     draw_enemy_bullets()
     draw_player_bullets()
+    draw_bullet_trails()
+    draw_muzzle_flashes()
+    draw_engine_particles()
+    draw_explosion_particles()
+    draw_levelup_particles()
+    draw_speed_lines()
 
     if not first_person:
         draw_ship_third_person()
     else:
         draw_first_person_helm_and_hands()
-
+    
+    draw_shield()
+    draw_health_bar()
     draw_hud()
+    draw_minimap()
+    draw_offscreen_indicators()
+    draw_damage_flash()
+    draw_pause_menu()
     glutSwapBuffers()
 
 def idle():
@@ -1557,6 +2855,20 @@ def idle():
     global player_life
     global player_bullet_cd
     global wormhole_tp_cd
+    global damage_flash_frames, shield_pulse_frames
+
+    if not game_started:
+        glutPostRedisplay()
+        return
+
+    if damage_flash_frames > 0:
+        damage_flash_frames -= 1
+    if shield_pulse_frames > 0:
+        shield_pulse_frames -= 1
+
+    if game_paused:
+        glutPostRedisplay()
+        return
 
     if wormhole_tp_cd > 0:
         wormhole_tp_cd -= 1
@@ -1618,6 +2930,26 @@ def idle():
 
     _apply_hole_physics()
     _update_wormhole_teleport()
+    
+    _spawn_engine_particles()
+    _update_engine_particles()
+    
+    _spawn_bh_pull_particles()
+    _update_bh_pull_particles()
+    
+    _spawn_wh_push_particles()
+    _update_wh_push_particles()
+    
+    _update_explosion_particles()
+    _update_muzzle_flashes()
+    _spawn_bullet_trails()
+    _update_bullet_trails()
+    _update_levelup_particles()
+    
+    _update_space_debris()
+    _spawn_wormhole_vortex_particles()
+    _update_wormhole_vortex_particles()
+    _update_speed_lines()
 
     #rocks
     for r in rocks:
@@ -1697,9 +3029,13 @@ def reset_game():
     global enemy_kills_total, rocks_destroyed
     global wormhole_tp_cd
     global _scoreboard_locked
+    global game_paused
+    global game_started
 
     wormhole_tp_cd = 0
     _scoreboard_locked = False
+    game_paused = False
+    game_started = True  # Keep game started after restart
 
     player_x, player_y, player_z = 0.0, 0.0, 30.0
     player_angle = 0.0
@@ -1725,22 +3061,62 @@ def reset_game():
 
     player_bullets.clear()
     player_bullet_cd = 0
+    engine_particles.clear()
+    bh_pull_particles.clear()
+    wh_push_particles.clear()
+    explosion_particles.clear()
+    muzzle_flashes.clear()
+    bullet_trails.clear()
+    levelup_particles.clear()
+    wormhole_vortex_particles.clear()
+    speed_lines.clear()
 
     init_rocks()
     init_black_holes()
     init_white_holes()
     init_wormholes()
     init_enemies()
+    init_stars()
+    init_space_debris()
 
 def keyboardListener(key, x, y):
-    global first_person, controls_disabled
+    global first_person, controls_disabled, game_paused, difficulty, game_started
     try:
         k = key.decode("utf-8").lower()
     except:
         return
 
+    # Start screen handling
+    if not game_started:
+        if k in ['1', '2', '3']:
+            if k == '1':
+                difficulty = "Easy"
+            elif k == '2':
+                difficulty = "Normal"
+            elif k == '3':
+                difficulty = "Hard"
+            return
+        elif k == ' ' or k == '\r':  # Space or Enter
+            game_started = True
+            return
+        return
+
     if k == 'r':
         reset_game()
+        return
+    
+    if k == 'p':
+        game_paused = not game_paused
+        return
+    
+    # Difficulty change (only when paused or game over)
+    if (game_paused or game_over) and k in ['1', '2', '3']:
+        if k == '1':
+            difficulty = "Easy"
+        elif k == '2':
+            difficulty = "Normal"
+        elif k == '3':
+            difficulty = "Hard"
         return
 
     if k == 'v':
@@ -1751,7 +3127,7 @@ def keyboardListener(key, x, y):
         _spawn_player_bullet()
         return
 
-    if controls_disabled:
+    if controls_disabled or game_paused:
         return
 
     if k in keys:
@@ -1764,7 +3140,7 @@ def keyboardUpListener(key, x, y):
     except:
         return
 
-    if controls_disabled:
+    if controls_disabled or game_paused:
         return
 
     if k in keys:
@@ -1799,6 +3175,8 @@ def main():
     init_white_holes()
     init_wormholes()
     init_enemies()
+    init_stars()
+    init_space_debris()
 
     glutDisplayFunc(showScreen)
     glutIdleFunc(idle)
