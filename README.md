@@ -149,7 +149,10 @@ Singularity-Wars/
 ## Credits
 
 Developed as part of CSE423 coursework.
-Special thanks to [AlifKhan24](https://github.com/AlifKhan24)
+
+**Original Creator**: [AlifKhan24](https://github.com/AlifKhan24) - Created the original Singularity Wars game
+
+**Conceptualized and Developed By**: [mrjahid11](https://github.com/mrjahid11) - Provided the core game concept and enhanced/modified the game
 
 ## License
 
