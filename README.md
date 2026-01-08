@@ -149,6 +149,7 @@ Singularity-Wars/
 ## Credits
 
 Developed as part of CSE423 coursework.
+Special thanks to [AlifKhan24](https://github.com/AlifKhan24)
 
 ## License
 
